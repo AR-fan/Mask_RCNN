@@ -683,6 +683,7 @@ class DetectionTargetLayer(KE.Layer):
             (None, self.config.TRAIN_ROIS_PER_IMAGE, 4),  # deltas
             (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.MASK_SHAPE[0],
              self.config.MASK_SHAPE[1])  # masks
+            (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.NUM_ATTRIBUTES)  # masks
         ]
 
     def compute_mask(self, inputs, mask=None):
@@ -2033,7 +2034,7 @@ class MaskRCNN():
             # fan
             rois, target_class_ids, target_bbox, target_mask, target_attribute_ids=\
                 DetectionTargetLayer(config, name="proposal_targets")([
-                    target_rois, input_gt_class_ids, gt_boxes, input_gt_masks,input_gt_attribute_ids])
+                    target_rois, input_gt_class_ids, gt_boxes, input_gt_masks, input_gt_attribute_ids])
 
             # Network Heads
             # TODO: verify that this handles zero padded ROIs

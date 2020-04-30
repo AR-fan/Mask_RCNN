@@ -682,8 +682,7 @@ class DetectionTargetLayer(KE.Layer):
             (None, self.config.TRAIN_ROIS_PER_IMAGE, 4),  # rois
             (None, self.config.TRAIN_ROIS_PER_IMAGE),  # class_ids
             (None, self.config.TRAIN_ROIS_PER_IMAGE, 4),  # deltas
-            (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.MASK_SHAPE[0],
-             self.config.MASK_SHAPE[1]),  # masks
+            (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.MASK_SHAPE[0],self.config.MASK_SHAPE[1]),  # masks
             (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.NUM_ATTRIBUTES)  # masks
         ]
 
@@ -1198,7 +1197,7 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
     return loss
 
 # fan
-def mrcnn_attribute_loss_graph(target_attribute_ids, mrcnn_attribute_logits, NUM_ATTRIBUTES):
+def mrcnn_attribute_loss_graph(target_attribute_ids, mrcnn_attribute_logits):
     # target_attribute_ids： [batch, num_rois, num_attributes]
     # mrcnn_attribute_logits: [batch, num_rois, num_attributes]
     target_attribute_ids = tf.cast(target_attribute_ids, 'int64')
@@ -2068,7 +2067,7 @@ class MaskRCNN():
                 [target_mask, target_class_ids, mrcnn_mask])
             # fan
             attribute_loss = KL.Lambda(lambda x: mrcnn_attribute_loss_graph(*x), name="mrcnn_attribute_loss")(
-                [target_attribute_ids, mrcnn_attribute_logits, config.NUM_ATTRIBUTES])
+                [target_attribute_ids, mrcnn_attribute_logits])
 
             # Model
             inputs = [input_image, input_image_meta,

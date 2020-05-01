@@ -683,11 +683,11 @@ class DetectionTargetLayer(KE.Layer):
             (None, self.config.TRAIN_ROIS_PER_IMAGE),  # class_ids
             (None, self.config.TRAIN_ROIS_PER_IMAGE, 4),  # deltas
             (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.MASK_SHAPE[0],self.config.MASK_SHAPE[1]),  # masks
-            (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.NUM_ATTRIBUTES)  # masks
+            (None, self.config.TRAIN_ROIS_PER_IMAGE, self.config.NUM_ATTRIBUTES)  # fan attributes
         ]
 
     def compute_mask(self, inputs, mask=None):
-        return [None, None, None, None]
+        return [None, None, None, None, None] # fan [None, None, None, None]
 
 
 ############################################################

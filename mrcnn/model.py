@@ -1200,7 +1200,7 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
 def mrcnn_attribute_loss_graph(target_attribute_ids, mrcnn_attribute_logits):
     # target_attribute_ids： [batch, num_rois, num_attributes]
     # mrcnn_attribute_logits: [batch, num_rois, num_attributes]
-    target_attribute_ids = tf.cast(target_attribute_ids, 'int64')
+    target_attribute_ids = tf.cast(target_attribute_ids, 'float32') # fan 
     # Reshape for simplicity. Merge first two dimensions into one.
     # target_attribute_ids = K.reshape(target_attribute_ids, (-1, NUM_ATTRIBUTES))
     loss = K.binary_crossentropy(target=target_attribute_ids, output=mrcnn_attribute_logits, from_logits=True)
@@ -2066,10 +2066,6 @@ class MaskRCNN():
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
                 [target_mask, target_class_ids, mrcnn_mask])
             # fan
-            print('fan')
-
-            fan = 10000
-            fan = 10001
             attribute_loss = KL.Lambda(lambda x: mrcnn_attribute_loss_graph(*x), name="mrcnn_attribute_loss")(
                 [target_attribute_ids, mrcnn_attribute_logits])
 

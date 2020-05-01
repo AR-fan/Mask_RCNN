@@ -2066,6 +2066,7 @@ class MaskRCNN():
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
                 [target_mask, target_class_ids, mrcnn_mask])
             # fan
+            print('fan')
             attribute_loss = KL.Lambda(lambda x: mrcnn_attribute_loss_graph(*x), name="mrcnn_attribute_loss")(
                 [target_attribute_ids, mrcnn_attribute_logits])
 

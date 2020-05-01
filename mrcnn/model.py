@@ -2070,8 +2070,8 @@ class MaskRCNN():
 
             fan = 10000
             fan = 10001
-            attribute_loss = KL.Lambda(lambda x: mrcnn_attribute_loss_graph(*x), name="mrcnn_attribute_loss")(
-                [target_attribute_ids, mrcnn_attribute_logits])
+            #attribute_loss = KL.Lambda(lambda x: mrcnn_attribute_loss_graph(*x), name="mrcnn_attribute_loss")(
+            #    [target_attribute_ids, mrcnn_attribute_logits])
 
             # Model
             inputs = [input_image, input_image_meta,

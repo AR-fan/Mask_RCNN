@@ -191,12 +191,14 @@ class Config(object):
 
     # Loss weights for more precise optimization.
     # Can be used for R-CNN training setup.
+    # fan
     LOSS_WEIGHTS = {
         "rpn_class_loss": 1.,
         "rpn_bbox_loss": 1.,
         "mrcnn_class_loss": 1.,
         "mrcnn_bbox_loss": 1.,
-        "mrcnn_mask_loss": 1.
+        "mrcnn_mask_loss": 1.,
+        "mrcnn_attribute_loss": 1.
     }
 
     # Use RPN ROIs or externally generated ROIs for training

@@ -694,7 +694,7 @@ class DetectionTargetLayer(KE.Layer):
 #  Detection Layer
 ############################################################
 
-def refine_detections_graph(rois, probs, deltas, window, config):
+def refine_detections_graph(rois, probs, deltas, window, config, mrcnn_attribute): # fan
     """Refine classified proposals and filter overlaps and return final
     detections.
 
@@ -705,7 +705,7 @@ def refine_detections_graph(rois, probs, deltas, window, config):
                 bounding box deltas.
         window: (y1, x1, y2, x2) in normalized coordinates. The part of the image
             that contains the image excluding the padding.
-
+        mrcnn_attribute: [N, num_classes, num_attributes]. Class-specific (fan)
     Returns detections shaped: [num_detections, (y1, x1, y2, x2, class_id, score)] where
         coordinates are normalized.
     """
@@ -722,6 +722,9 @@ def refine_detections_graph(rois, probs, deltas, window, config):
         rois, deltas_specific * config.BBOX_STD_DEV)
     # Clip boxes to image window
     refined_rois = clip_boxes_graph(refined_rois, window)
+
+    # fan
+    attribute =  tf.gather_nd(mrcnn_attribute, indices)
 
     # TODO: Filter out boxes with zero area
 
@@ -778,12 +781,13 @@ def refine_detections_graph(rois, probs, deltas, window, config):
     top_ids = tf.nn.top_k(class_scores_keep, k=num_keep, sorted=True)[1]
     keep = tf.gather(keep, top_ids)
 
-    # Arrange output as [N, (y1, x1, y2, x2, class_id, score)]
+    # Arrange output as [N, (y1, x1, y2, x2, class_id, score, attribute)]
     # Coordinates are normalized.
     detections = tf.concat([
         tf.gather(refined_rois, keep),
         tf.to_float(tf.gather(class_ids, keep))[..., tf.newaxis],
-        tf.gather(class_scores, keep)[..., tf.newaxis]
+        tf.gather(class_scores, keep)[..., tf.newaxis],
+        tf.gather(attribute, keep)[..., tf.newaxis], # fan
         ], axis=1)
 
     # Pad with zeros if detections < DETECTION_MAX_INSTANCES
@@ -797,8 +801,9 @@ class DetectionLayer(KE.Layer):
     returns the final detection boxes.
 
     Returns:
-    [batch, num_detections, (y1, x1, y2, x2, class_id, class_score)] where
+    [batch, num_detections, (y1, x1, y2, x2, class_id, class_score, attribute)] where
     coordinates are normalized.
+    attribute没有参与NMS  fan
     """
 
     def __init__(self, config=None, **kwargs):
@@ -810,6 +815,7 @@ class DetectionLayer(KE.Layer):
         mrcnn_class = inputs[1]
         mrcnn_bbox = inputs[2]
         image_meta = inputs[3]
+        mrcnn_attribute = inputs[4] # fan
 
         # Get windows of images in normalized coordinates. Windows are the area
         # in the image that excludes the padding.
@@ -821,19 +827,19 @@ class DetectionLayer(KE.Layer):
 
         # Run detection refinement graph on each item in the batch
         detections_batch = utils.batch_slice(
-            [rois, mrcnn_class, mrcnn_bbox, window],
-            lambda x, y, w, z: refine_detections_graph(x, y, w, z, self.config),
+            [rois, mrcnn_class, mrcnn_bbox, window, mrcnn_attribute], # fan
+            lambda x, y, w, z, a: refine_detections_graph(x, y, w, z, a, self.config), # fan
             self.config.IMAGES_PER_GPU)
 
         # Reshape output
-        # [batch, num_detections, (y1, x1, y2, x2, class_id, class_score)] in
+        # [batch, num_detections, (y1, x1, y2, x2, class_id, class_score, attribute)] in
         # normalized coordinates
         return tf.reshape(
             detections_batch,
-            [self.config.BATCH_SIZE, self.config.DETECTION_MAX_INSTANCES, 6])
+            [self.config.BATCH_SIZE, self.config.DETECTION_MAX_INSTANCES, 7]) # fan
 
     def compute_output_shape(self, input_shape):
-        return (None, self.config.DETECTION_MAX_INSTANCES, 6)
+        return (None, self.config.DETECTION_MAX_INSTANCES, 7) # fan
 
 
 ############################################################
@@ -968,7 +974,10 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
     mrcnn_attribute_logits = KL.TimeDistributed(KL.Dense(num_attributes),
                                             name='mrcnn_attribute_logits')(shared)
 
-    return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox, mrcnn_attribute_logits
+    mrcnn_attribute_probs = KL.TimeDistributed(KL.Activation("softmax"),
+                                     name="mrcnn_attribute")(mrcnn_attribute_logits)
+
+    return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox, mrcnn_attribute_logits, mrcnn_attribute_probs
 
 
 def build_fpn_mask_graph(rois, feature_maps, image_meta,
@@ -2039,7 +2048,7 @@ class MaskRCNN():
             # Network Heads
             # TODO: verify that this handles zero padded ROIs
             # fan
-            mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_attribute_logits =\
+            mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_attribute_logits, mrcnn_attribute =\
                 fpn_classifier_graph(rois, mrcnn_feature_maps, input_image_meta,
                                      config.POOL_SIZE, config.NUM_CLASSES, config.NUM_ATTRIBUTES,
                                      train_bn=config.TRAIN_BN,
@@ -2082,17 +2091,19 @@ class MaskRCNN():
         else:
             # Network Heads
             # Proposal classifier and BBox regressor heads
-            mrcnn_class_logits, mrcnn_class, mrcnn_bbox =\
+            # fan
+            mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_attribute_logits, mrcnn_attribute =\
                 fpn_classifier_graph(rpn_rois, mrcnn_feature_maps, input_image_meta,
-                                     config.POOL_SIZE, config.NUM_CLASSES,
+                                     config.POOL_SIZE, config.NUM_CLASSES, config.NUM_ATTRIBUTES,
                                      train_bn=config.TRAIN_BN,
                                      fc_layers_size=config.FPN_CLASSIF_FC_LAYERS_SIZE)
 
             # Detections
             # output is [batch, num_detections, (y1, x1, y2, x2, class_id, score)] in
             # normalized coordinates
+            # fan
             detections = DetectionLayer(config, name="mrcnn_detection")(
-                [rpn_rois, mrcnn_class, mrcnn_bbox, input_image_meta])
+                [rpn_rois, mrcnn_class, mrcnn_bbox, input_image_meta, mrcnn_attribute])
 
             # Create masks for detections
             detection_boxes = KL.Lambda(lambda x: x[..., :4])(detections)
@@ -2494,6 +2505,7 @@ class MaskRCNN():
         boxes = detections[:N, :4]
         class_ids = detections[:N, 4].astype(np.int32)
         scores = detections[:N, 5]
+        attributes = detections[:N, 6] # fan
         masks = mrcnn_mask[np.arange(N), :, :, class_ids]
 
         # Translate normalized coordinates in the resized image to pixel
@@ -2518,6 +2530,7 @@ class MaskRCNN():
             class_ids = np.delete(class_ids, exclude_ix, axis=0)
             scores = np.delete(scores, exclude_ix, axis=0)
             masks = np.delete(masks, exclude_ix, axis=0)
+            attributes = np.delete(attributes, exclude_ix, axis=0) # fan
             N = class_ids.shape[0]
 
         # Resize masks to original image size and set boundary threshold.
@@ -2529,7 +2542,7 @@ class MaskRCNN():
         full_masks = np.stack(full_masks, axis=-1)\
             if full_masks else np.empty(original_image_shape[:2] + (0,))
 
-        return boxes, class_ids, scores, full_masks
+        return boxes, class_ids, scores, full_masks, attributes # fan
 
     def detect(self, images, verbose=0):
         """Runs the detection pipeline.
@@ -2577,7 +2590,7 @@ class MaskRCNN():
         # Process detections
         results = []
         for i, image in enumerate(images):
-            final_rois, final_class_ids, final_scores, final_masks =\
+            final_rois, final_class_ids, final_scores, final_masks, final_attributes =\
                 self.unmold_detections(detections[i], mrcnn_mask[i],
                                        image.shape, molded_images[i].shape,
                                        windows[i])
@@ -2586,6 +2599,7 @@ class MaskRCNN():
                 "class_ids": final_class_ids,
                 "scores": final_scores,
                 "masks": final_masks,
+                "attributes": final_attributes,
             })
         return results
 

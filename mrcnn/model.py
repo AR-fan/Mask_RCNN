@@ -1200,7 +1200,7 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
 def mrcnn_attribute_loss_graph(target_attribute_ids, mrcnn_attribute_logits):
     # target_attribute_ids： [batch, num_rois, num_attributes]
     # mrcnn_attribute_logits: [batch, num_rois, num_attributes]
-    target_attribute_ids = tf.cast(target_attribute_ids, 'float32') # fan 
+    target_attribute_ids = tf.cast(target_attribute_ids, 'float32') # fan
     # Reshape for simplicity. Merge first two dimensions into one.
     # target_attribute_ids = K.reshape(target_attribute_ids, (-1, NUM_ATTRIBUTES))
     loss = K.binary_crossentropy(target=target_attribute_ids, output=mrcnn_attribute_logits, from_logits=True)
@@ -1810,7 +1810,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
             batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
             batch_gt_masks[b, :, :, :gt_masks.shape[-1]] = gt_masks
-            batch_gt_attribute_ids[b, gt_attribute_ids.shape[0]] = gt_attribute_ids
+            batch_gt_attribute_ids[b, :gt_attribute_ids.shape[0]] = gt_attribute_ids
             if random_rois: # 跳过
                 batch_rpn_rois[b] = rpn_rois
                 if detection_targets:

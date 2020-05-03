@@ -694,7 +694,7 @@ class DetectionTargetLayer(KE.Layer):
 #  Detection Layer
 ############################################################
 
-def refine_detections_graph(rois, probs, deltas, window, config, mrcnn_attribute): # fan
+def refine_detections_graph(rois, probs, deltas, window, mrcnn_attribute, config): # fan
     """Refine classified proposals and filter overlaps and return final
     detections.
 

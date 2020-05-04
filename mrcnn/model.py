@@ -723,8 +723,9 @@ def refine_detections_graph(rois, probs, deltas, window, mrcnn_attribute, config
     # Clip boxes to image window
     refined_rois = clip_boxes_graph(refined_rois, window)
 
-    # fan
-    attribute =  tf.gather_nd(mrcnn_attribute, indices)
+    # fan 假设attribute和class无关
+    attribute = mrcnn_attribute
+    # attribute =  tf.gather_nd(mrcnn_attribute, indices)
 
     # TODO: Filter out boxes with zero area
 

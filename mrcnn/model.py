@@ -837,10 +837,10 @@ class DetectionLayer(KE.Layer):
         # normalized coordinates
         return tf.reshape(
             detections_batch,
-            [self.config.BATCH_SIZE, self.config.DETECTION_MAX_INSTANCES, 7]) # fan
+            [self.config.BATCH_SIZE, self.config.DETECTION_MAX_INSTANCES, 300]) # fan
 
     def compute_output_shape(self, input_shape):
-        return (None, self.config.DETECTION_MAX_INSTANCES, 7) # fan
+        return (None, self.config.DETECTION_MAX_INSTANCES, 300) # fan
 
 
 ############################################################
@@ -2506,7 +2506,7 @@ class MaskRCNN():
         boxes = detections[:N, :4]
         class_ids = detections[:N, 4].astype(np.int32)
         scores = detections[:N, 5]
-        attributes = detections[:N, 6] # fan
+        attributes = detections[:N, 6:] # fan
         masks = mrcnn_mask[np.arange(N), :, :, class_ids]
 
         # Translate normalized coordinates in the resized image to pixel

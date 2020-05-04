@@ -975,7 +975,7 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
     mrcnn_attribute_logits = KL.TimeDistributed(KL.Dense(num_attributes),
                                             name='mrcnn_attribute_logits')(shared)
 
-    mrcnn_attribute_probs = KL.TimeDistributed(KL.Activation("softmax"),
+    mrcnn_attribute_probs = KL.TimeDistributed(KL.Activation("sigmoid"),
                                      name="mrcnn_attribute")(mrcnn_attribute_logits)
 
     return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox, mrcnn_attribute_logits, mrcnn_attribute_probs

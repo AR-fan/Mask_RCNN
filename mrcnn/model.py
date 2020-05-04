@@ -788,7 +788,7 @@ def refine_detections_graph(rois, probs, deltas, window, mrcnn_attribute, config
         tf.gather(refined_rois, keep),
         tf.to_float(tf.gather(class_ids, keep))[..., tf.newaxis],
         tf.gather(class_scores, keep)[..., tf.newaxis],
-        tf.gather(attribute, keep)[..., tf.newaxis], # fan
+        tf.gather(attribute, keep) # fan
         ], axis=1)
 
     # Pad with zeros if detections < DETECTION_MAX_INSTANCES

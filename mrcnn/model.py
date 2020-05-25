@@ -2383,6 +2383,7 @@ class MaskRCNN():
             "5+": r"(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)",
             # All layers
             "all": ".*",
+            "attribute": r"mrcnn\_attribute.*"
         }
         if layers in layer_regex.keys():
             layers = layer_regex[layers]

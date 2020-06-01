@@ -65,7 +65,7 @@ DEFAULT_DATASET_YEAR = "2014"
 
 ############################################################
 #  Configurations
-############################################################
+# ###########################################################
 
 
 class CocoConfig(Config):
@@ -78,7 +78,7 @@ class CocoConfig(Config):
 
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
-    IMAGES_PER_GPU = 2
+    IMAGES_PER_GPU = 1 # 资源少，暂时设置为2 -> 1 [fan]
 
     # Uncomment to train on 8 GPUs (default is 1)
     # GPU_COUNT = 8
@@ -89,7 +89,7 @@ class CocoConfig(Config):
 
 ############################################################
 #  Dataset
-############################################################
+# ###########################################################
 
 class CocoDataset(utils.Dataset):
     def load_coco(self, dataset_dir, subset, year=DEFAULT_DATASET_YEAR, class_ids=None,
@@ -310,7 +310,7 @@ class CocoDataset(utils.Dataset):
 
 ############################################################
 #  COCO Evaluation
-############################################################
+# ###########################################################
 
 def build_coco_results(dataset, image_ids, rois, class_ids, scores, masks):
     """Arrange resutls to match COCO specs in http://cocodataset.org/#format
@@ -393,13 +393,22 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 
 ############################################################
 #  Training
-############################################################
+# ###########################################################
 
 
 if __name__ == '__main__':
+
+    import tensorflow as tf
+    from keras.backend.tensorflow_backend import set_session
+    config = tf.ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = 0.3
+    set_session(tf.Session(config=config))
+    # 这里分配了347MiB显存，770088 kB内存[fan]
+
+
     import argparse
 
-    # Parse command line arguments
+    # Parse command line arguments 解析命令行传入的参数值 [fan]
     parser = argparse.ArgumentParser(
         description='Train Mask R-CNN on MS COCO.')
     parser.add_argument("command",
@@ -415,6 +424,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', required=True,
                         metavar="/path/to/weights.h5",
                         help="Path to weights .h5 file or 'coco'")
+    # 模型保存的地址 [fan]
     parser.add_argument('--logs', required=False,
                         default=DEFAULT_LOGS_DIR,
                         metavar="/path/to/logs/",
@@ -438,7 +448,7 @@ if __name__ == '__main__':
 
     # Configurations
     if args.command == "train":
-        config = CocoConfig()
+        config = CocoConfig() # 根据训练COCO数据集的方式，重写配置基类 [fan]
     else:
         class InferenceConfig(CocoConfig):
             # Set batch size to 1 since we'll be running inference on
@@ -449,14 +459,14 @@ if __name__ == '__main__':
         config = InferenceConfig()
     config.display()
 
-    # Create model
+    # Create model  重点[fan]
     if args.command == "train":
         model = modellib.MaskRCNN(mode="training", config=config,
                                   model_dir=args.logs)
     else:
         model = modellib.MaskRCNN(mode="inference", config=config,
                                   model_dir=args.logs)
-
+    # 分配了347MiB显存  VmRSS: 858244 kB
     # Select weights file to load
     if args.model.lower() == "coco":
         model_path = COCO_MODEL_PATH
@@ -472,7 +482,7 @@ if __name__ == '__main__':
     # Load weights
     print("Loading weights ", model_path)
     model.load_weights(model_path, by_name=True)
-
+    # 显存 5233MiB  VmRSS：1918412 kB [fan]
     # Train or evaluate
     if args.command == "train":
         # Training dataset. Use the training set and 35K from the
@@ -499,7 +509,7 @@ if __name__ == '__main__':
         print("Training network heads")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE,
-                    epochs=40,
+                    epochs=1, # 我暂时改为40 -》 1 [fan]
                     layers='heads',
                     augmentation=augmentation)
 
@@ -508,7 +518,7 @@ if __name__ == '__main__':
         print("Fine tune Resnet stage 4 and up")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE,
-                    epochs=120,
+                    epochs=1,# 我暂时改为120 -》 1 [fan]
                     layers='4+',
                     augmentation=augmentation)
 
@@ -517,10 +527,10 @@ if __name__ == '__main__':
         print("Fine tune all layers")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE / 10,
-                    epochs=160,
+                    epochs=1, # 我暂时改为160 -》 1 [fan]
                     layers='all',
                     augmentation=augmentation)
-
+        print("fan")
     elif args.command == "evaluate":
         # Validation dataset
         dataset_val = CocoDataset()

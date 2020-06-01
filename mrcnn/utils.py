@@ -180,32 +180,6 @@ def apply_box_deltas(boxes, deltas):
     return np.stack([y1, x1, y2, x2], axis=1)
 
 
-def box_refinement_graph(box, gt_box):
-    """Compute refinement needed to transform box to gt_box.
-    box and gt_box are [N, (y1, x1, y2, x2)]
-    """
-    box = tf.cast(box, tf.float32)
-    gt_box = tf.cast(gt_box, tf.float32)
-
-    height = box[:, 2] - box[:, 0]
-    width = box[:, 3] - box[:, 1]
-    center_y = box[:, 0] + 0.5 * height
-    center_x = box[:, 1] + 0.5 * width
-
-    gt_height = gt_box[:, 2] - gt_box[:, 0]
-    gt_width = gt_box[:, 3] - gt_box[:, 1]
-    gt_center_y = gt_box[:, 0] + 0.5 * gt_height
-    gt_center_x = gt_box[:, 1] + 0.5 * gt_width
-
-    dy = (gt_center_y - center_y) / height
-    dx = (gt_center_x - center_x) / width
-    dh = tf.log(gt_height / height)
-    dw = tf.log(gt_width / width)
-
-    result = tf.stack([dy, dx, dh, dw], axis=1)
-    return result
-
-
 def box_refinement(box, gt_box):
     """Compute refinement needed to transform box to gt_box.
     box and gt_box are [N, (y1, x1, y2, x2)]. (y2, x2) is
@@ -230,6 +204,32 @@ def box_refinement(box, gt_box):
     dw = np.log(gt_width / width)
 
     return np.stack([dy, dx, dh, dw], axis=1)
+
+
+def box_refinement_graph(box, gt_box):
+    """Compute refinement needed to transform box to gt_box. #[fan] 计算由提议框(box)变化到物体框(gt_box)的偏移量，作为边框回归的真值
+    box and gt_box are [N, (y1, x1, y2, x2)]
+    """
+    box = tf.cast(box, tf.float32) #[fan] 将值转为浮点数,后面要做除法和log运算
+    gt_box = tf.cast(gt_box, tf.float32)
+    #[fan] 要变化的框的宽、高、中心坐标
+    height = box[:, 2] - box[:, 0]
+    width = box[:, 3] - box[:, 1]
+    center_y = box[:, 0] + 0.5 * height
+    center_x = box[:, 1] + 0.5 * width
+    #[fan] 想要变化到的目标框 的宽、高、中心坐标
+    gt_height = gt_box[:, 2] - gt_box[:, 0]
+    gt_width = gt_box[:, 3] - gt_box[:, 1]
+    gt_center_y = gt_box[:, 0] + 0.5 * gt_height
+    gt_center_x = gt_box[:, 1] + 0.5 * gt_width
+    #[fan] 根据Fast RCNN中的公式可得 四个偏移量真值：
+    dy = (gt_center_y - center_y) / height
+    dx = (gt_center_x - center_x) / width
+    dh = tf.log(gt_height / height)
+    dw = tf.log(gt_width / width)
+
+    result = tf.stack([dy, dx, dh, dw], axis=1) #[fan] 整理下格式
+    return result
 
 
 ############################################################
@@ -268,7 +268,7 @@ class Dataset(object):
                 return
         # Add the class
         self.class_info.append({
-            "source": source,
+            "source": source, # 这里应该是指数据来源，来自哪个数据库
             "id": class_id,
             "name": class_name,
         })
@@ -302,7 +302,7 @@ class Dataset(object):
             """Returns a shorter version of object names for cleaner display."""
             return ",".join(name.split(",")[:1])
 
-        # Build (or rebuild) everything else from the info dicts.
+        # Build (or rebuild) everything else from the info dicts. # 总结
         self.num_classes = len(self.class_info)
         self.class_ids = np.arange(self.num_classes)
         self.class_names = [clean_name(c["name"]) for c in self.class_info]
@@ -315,7 +315,7 @@ class Dataset(object):
         self.image_from_source_map = {"{}.{}".format(info['source'], info['id']): id
                                       for info, id in zip(self.image_info, self.image_ids)}
 
-        # Map sources to class_ids they support
+        # Map sources to class_ids they support # 不同数据集？
         self.sources = list(set([i['source'] for i in self.class_info]))
         self.source_class_ids = {}
         # Loop over datasets
@@ -589,38 +589,46 @@ def generate_anchors(scales, ratios, shape, feature_stride, anchor_stride):
     feature_stride: Stride of the feature map relative to the image in pixels.
     anchor_stride: Stride of anchors on the feature map. For example, if the
         value is 2 then generate anchors for every other feature map pixel.
+    [1:]
+    scales: anchor大小的一维数组，单位是像素。例如: [32, 64, 128]。
+    ratios: anchor宽/高比的一维数组。 例如: [0.5, 1, 2]。
+    shape: [height, width] feature map的形状。
+    feature_stride: feature map与图像关联的stride，单位是像素。
+    anchor_stride: feature map与anchors关联的stride。 例如, anchor_stride=2
+                    则每隔一个feature map生成anchors。
     """
     # Get all combinations of scales and ratios
-    scales, ratios = np.meshgrid(np.array(scales), np.array(ratios))
-    scales = scales.flatten()
-    ratios = ratios.flatten()
+    # 对scales进行纵向扩展，扩展的次数以ratios为依据 [1]
+    scales, ratios = np.meshgrid(np.array(scales), np.array(ratios)) # 32->[32,32,32]  [0.5,1,2]->[[0.5],[1],[2]]  二维坐标系中,X轴可以取三个值1,2,3, Y轴可以取三个值7,8, 请问可以获得多少个点的坐标? https://blog.csdn.net/littlehaes/article/details/83543459
+    scales = scales.flatten() # [32,32,32] -> [32,32,32] [fan]
+    ratios = ratios.flatten() # [[0.5],[1],[2]] -> [0.5,1,2] [fan]
 
-    # Enumerate heights and widths from scales and ratios
-    heights = scales / np.sqrt(ratios)
+    # Enumerate heights and widths from scales and ratios # 求出面积一定下三种比例的anchor的长宽 [fan]
+    heights = scales / np.sqrt(ratios) # 例如：45.25483399593904 32 22.62741699796952 [fan]
     widths = scales * np.sqrt(ratios)
 
-    # Enumerate shifts in feature space
+    # Enumerate shifts in feature space # 特征图上每个锚点对应到原图的(y轴/x轴)偏移量 [fan]
     shifts_y = np.arange(0, shape[0], anchor_stride) * feature_stride
     shifts_x = np.arange(0, shape[1], anchor_stride) * feature_stride
-    shifts_x, shifts_y = np.meshgrid(shifts_x, shifts_y)
+    shifts_x, shifts_y = np.meshgrid(shifts_x, shifts_y) # 二维坐标系中,X轴可以取三个值1,2,3, Y轴可以取三个值7,8, 请问可以获得多少个点的坐标? https://blog.csdn.net/littlehaes/article/details/83543459
 
     # Enumerate combinations of shifts, widths, and heights
-    box_widths, box_centers_x = np.meshgrid(widths, shifts_x)
-    box_heights, box_centers_y = np.meshgrid(heights, shifts_y)
+    box_widths, box_centers_x = np.meshgrid(widths, shifts_x) # (65536, 3) 特征图上每个anchor对应到原图的中心点的x轴坐标和框的宽度 [fan]
+    box_heights, box_centers_y = np.meshgrid(heights, shifts_y) # (65536, 3) 特征图上每个anchor对应到原图的中心点的y轴坐标和框的高度 [fan]
 
     # Reshape to get a list of (y, x) and a list of (h, w)
-    box_centers = np.stack(
+    box_centers = np.stack( # (196608, 2)  特征图上每个anchor对应到原图的中心点的x、y轴坐标 [fan]
         [box_centers_y, box_centers_x], axis=2).reshape([-1, 2])
-    box_sizes = np.stack([box_heights, box_widths], axis=2).reshape([-1, 2])
+    box_sizes = np.stack([box_heights, box_widths], axis=2).reshape([-1, 2]) # (196608, 2)  特征图上每个anchor对应到原图的高和宽 [fan]
 
-    # Convert to corner coordinates (y1, x1, y2, x2)
+    # Convert to corner coordinates (y1, x1, y2, x2) #  (196608, 4)  特征图上每个anchor对应到原图的左上角和右下角坐标 [fan]
     boxes = np.concatenate([box_centers - 0.5 * box_sizes,
                             box_centers + 0.5 * box_sizes], axis=1)
     return boxes
 
 
 def generate_pyramid_anchors(scales, ratios, feature_shapes, feature_strides,
-                             anchor_stride):
+                             anchor_stride):# 生成FPN每一层特征图的锚框 [3]
     """Generate anchors at different levels of a feature pyramid. Each scale
     is associated with a level of the pyramid, but each ratio is used in
     all levels of the pyramid.
@@ -630,7 +638,7 @@ def generate_pyramid_anchors(scales, ratios, feature_shapes, feature_strides,
         with the same order of the given scales. So, anchors of scale[0] come
         first, then anchors of scale[1], and so on.
     """
-    # Anchors
+    # 输出Anchors
     # [anchor_count, (y1, x1, y2, x2)]
     anchors = []
     for i in range(len(scales)):
@@ -793,7 +801,7 @@ def compute_recall(pred_boxes, gt_boxes, iou):
     return recall, positive_ids
 
 
-# ## Batch Slicing
+# ## Batch Slicing [fan:]有些操作不支持多批次，这里实现了多批次(多图同时训练)
 # Some custom layers support a batch size of 1 only, and require a lot of work
 # to support batches greater than 1. This function slices an input tensor
 # across the batch dimension and feeds batches of size 1. Effectively,
@@ -811,12 +819,23 @@ def batch_slice(inputs, graph_fn, batch_size, names=None):
     batch_size: number of slices to divide the data into.
     names: If provided, assigns names to the resulting tensors.
     """
+    """
+    [1]将输入分解成slices并将每个slice喂给给定的计算graph的副本，
+    最后将结果组合起来。仅允许在一个batch的输入上允许graph，尽管graph只支持一个instance。
+    inputs: tensors列表. 它们的第一个维度必须相同。
+    graph_fn: 函数，返回graph的一个 TF tensor。
+    batch_size: 要分割的slices数量。
+    names: 如果给出, 将names赋给结果tensors。
+    """
     if not isinstance(inputs, list):
         inputs = [inputs]
 
     outputs = []
+    # [1] 将batch拆分了，逐个处理， 以batch=3为例，[3,261888,4]
     for i in range(batch_size):
+        #[1] 抽出batch[i],inputs_slice为[261888.4]
         inputs_slice = [x[i] for x in inputs]
+        #[1] output_slice为[6000,4]
         output_slice = graph_fn(*inputs_slice)
         if not isinstance(output_slice, (tuple, list)):
             output_slice = [output_slice]
@@ -824,11 +843,17 @@ def batch_slice(inputs, graph_fn, batch_size, names=None):
     # Change outputs from a list of slices where each is
     # a list of outputs to a list of outputs and each has
     # a list of slices
+    #[1] 下面示意中假设每次graph_fn返回两个tensor
+    # [[tensor11, tensor12], [tensor21, tensor22], ……]
+    # ——> [(tensor11, tensor21, ……), (tensor12, tensor22, ……)]  zip返回的是多个tuple
     outputs = list(zip(*outputs))
 
     if names is None:
         names = [None] * len(outputs)
-
+    #[1] 将batch维度合并回去
+    # tf.stack沿着新轴堆叠数据,axis=0时意味着会增加一个newaxis=0
+    # zip打包时，o=(b0,b1,b2)，并且沿着axis=0进行stack堆叠，还原为原始的inputs.shape
+    # result结构为tf.Tensor->[b1,b2,b3],shape为[3,6000,4]
     result = [tf.stack(o, axis=0, name=n)
               for o, n in zip(outputs, names)]
     if len(result) == 1:
@@ -856,7 +881,7 @@ def norm_boxes(boxes, shape):
     shape: [..., (height, width)] in pixels
 
     Note: In pixel coordinates (y2, x2) is outside the box. But in normalized
-    coordinates it's inside the box.
+    coordinates it's inside the box.   -_-！[fan:黑人问号脸]
 
     Returns:
         [N, (y1, x1, y2, x2)] in normalized coordinates

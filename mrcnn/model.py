@@ -82,7 +82,7 @@ def compute_backbone_shapes(config, image_shape):
     return np.array(
         [[int(math.ceil(image_shape[0] / stride)),
             int(math.ceil(image_shape[1] / stride))]
-            for stride in config.BACKBONE_STRIDES])
+            for stride in config.BACKBONE_STRIDES]) # P2, P3, P4, P5, P6 对应原图的下采样倍率是 4，8，16，32，64 . 知道了下采样倍率和原图大小，就可以知道特征图的大小 [fan]
 
 
 ############################################################
@@ -144,7 +144,7 @@ def conv_block(input_tensor, kernel_size, filters, stage, block,
     nb_filter1, nb_filter2, nb_filter3 = filters
     conv_name_base = 'res' + str(stage) + block + '_branch'
     bn_name_base = 'bn' + str(stage) + block + '_branch'
-
+    # 2倍下采样 [fan]
     x = KL.Conv2D(nb_filter1, (1, 1), strides=strides,
                   name=conv_name_base + '2a', use_bias=use_bias)(input_tensor)
     x = BatchNorm(name=bn_name_base + '2a')(x, training=train_bn)
@@ -168,7 +168,7 @@ def conv_block(input_tensor, kernel_size, filters, stage, block,
     return x
 
 
-def resnet_graph(input_image, architecture, stage5=False, train_bn=True):
+def resnet_graph(input_image, architecture, stage5=False, train_bn=True): # 这个函数在文档的"构建ResNet"中详细说明了 [fan]
     """Build a ResNet graph.
         architecture: Can be resnet50 or resnet101
         stage5: Boolean. If False, stage5 of the network is not created
@@ -176,16 +176,16 @@ def resnet_graph(input_image, architecture, stage5=False, train_bn=True):
     """
     assert architecture in ["resnet50", "resnet101"]
     # Stage 1
-    x = KL.ZeroPadding2D((3, 3))(input_image)
-    x = KL.Conv2D(64, (7, 7), strides=(2, 2), name='conv1', use_bias=True)(x)
-    x = BatchNorm(name='bn_conv1')(x, training=train_bn)
+    x = KL.ZeroPadding2D((3, 3))(input_image) # 对2D输入（如图片）的边界填充0，以控制卷积以后特征图的大小。元组里的整数代表填充0的数目，两边都会补零 [fan] 卷积的操作中,如果使用same,或valid这种模式,有时候会不灵活。必要的时候,需要我们自己去进行补零操作,庆幸的是keras的补零操作是非常灵活的。https://blog.csdn.net/lujiandong1/article/details/54918320
+    x = KL.Conv2D(64, (7, 7), strides=(2, 2), name='conv1', use_bias=True)(x) # 64是卷积核的个数，(7,7)是卷积核的长宽 [fan]
+    x = BatchNorm(name='bn_conv1')(x, training=train_bn) # 批量归一化层 [fan]
     x = KL.Activation('relu')(x)
     C1 = x = KL.MaxPooling2D((3, 3), strides=(2, 2), padding="same")(x)
     # Stage 2
-    x = conv_block(x, 3, [64, 64, 256], stage=2, block='a', strides=(1, 1), train_bn=train_bn)
+    x = conv_block(x, 3, [64, 64, 256], stage=2, block='a', strides=(1, 1), train_bn=train_bn) # 注意这里的步长为1，与论文里的架构描述吻合 。下面的Stage的步长默认是2[fan]
     x = identity_block(x, 3, [64, 64, 256], stage=2, block='b', train_bn=train_bn)
     C2 = x = identity_block(x, 3, [64, 64, 256], stage=2, block='c', train_bn=train_bn)
-    # Stage 3
+    # Stage 3 [fan] 按照VGG的设计，每个Stage会按两倍率下采样，同时可以发现不同Stage的卷积核的个数乘了2
     x = conv_block(x, 3, [128, 128, 512], stage=3, block='a', train_bn=train_bn)
     x = identity_block(x, 3, [128, 128, 512], stage=3, block='b', train_bn=train_bn)
     x = identity_block(x, 3, [128, 128, 512], stage=3, block='c', train_bn=train_bn)
@@ -209,23 +209,25 @@ def resnet_graph(input_image, architecture, stage5=False, train_bn=True):
 ############################################################
 #  Proposal Layer
 ############################################################
-
-def apply_box_deltas_graph(boxes, deltas):
+def apply_box_deltas_graph(boxes, deltas): # 利用预测的回归值，对框进行微调[fan]
     """Applies the given deltas to the given boxes.
     boxes: [N, (y1, x1, y2, x2)] boxes to update
     deltas: [N, (dy, dx, log(dh), log(dw))] refinements to apply
     """
     # Convert to y, x, h, w
+    #[1] 将box的边界表示法转换为中心表示法
     height = boxes[:, 2] - boxes[:, 0]
     width = boxes[:, 3] - boxes[:, 1]
     center_y = boxes[:, 0] + 0.5 * height
     center_x = boxes[:, 1] + 0.5 * width
     # Apply deltas
+    #[1] 根据deltas精修锚框 # 这里根据文档的资料反推，可以对上[fan]
     center_y += deltas[:, 0] * height
     center_x += deltas[:, 1] * width
     height *= tf.exp(deltas[:, 2])
     width *= tf.exp(deltas[:, 3])
     # Convert back to y1, x1, y2, x2
+    #[1] 将精修后的中心表示法的box转换为边界表示法
     y1 = center_y - 0.5 * height
     x1 = center_x - 0.5 * width
     y2 = y1 + height
@@ -242,7 +244,7 @@ def clip_boxes_graph(boxes, window):
     # Split
     wy1, wx1, wy2, wx2 = tf.split(window, 4)
     y1, x1, y2, x2 = tf.split(boxes, 4, axis=1)
-    # Clip
+    # Clip # 砍掉超出限定边界的边框区域。以图片左上角为(0,0)。minimum()表明限定框的坐标值最大不可大过限定右下角的坐标值。maximum()表明限定框的坐标值最小不可小过限定左上角的坐标值 [fan]
     y1 = tf.maximum(tf.minimum(y1, wy2), wy1)
     x1 = tf.maximum(tf.minimum(x1, wx2), wx1)
     y2 = tf.maximum(tf.minimum(y2, wy2), wy1)
@@ -257,7 +259,7 @@ class ProposalLayer(KE.Layer):
     to the second stage. Filtering is done based on anchor scores and
     non-max suppression to remove overlaps. It also applies bounding
     box refinement deltas to anchors.
-
+    fan: 下面的batch应该是同时计算的图片的个数。
     Inputs:
         rpn_probs: [batch, num_anchors, (bg prob, fg prob)]
         rpn_bbox: [batch, num_anchors, (dy, dx, log(dh), log(dw))]
@@ -274,19 +276,22 @@ class ProposalLayer(KE.Layer):
         self.nms_threshold = nms_threshold
 
     def call(self, inputs):
-        # Box Scores. Use the foreground class confidence. [Batch, num_rois, 1]
-        scores = inputs[0][:, :, 1]
+        # Box Scores. Use the foreground class confidence. [Batch, num_rois, fg prob]
+        scores = inputs[0][:, :, 1] # 所有Anchor前景的概率 要看上面注释提供的维度信息好理解些 [fan]
         # Box deltas [batch, num_rois, 4]
-        deltas = inputs[1]
+        deltas = inputs[1] # Anchor坐标微调 [fan]
         deltas = deltas * np.reshape(self.config.RPN_BBOX_STD_DEV, [1, 1, 4])
-        # Anchors
-        anchors = inputs[2]
+        # [fan] simple Faster R-CNN中也出现了方差。 乘方差的原因是，为了将delta 恢复成 坐标，以便于后面做NMS计算交并比。  请见 https://github.com/matterport/Mask_RCNN/issues/1900
 
-        # Improve performance by trimming to top anchors by score
-        # and doing the rest on the smaller subset.
-        pre_nms_limit = tf.minimum(self.config.PRE_NMS_LIMIT, tf.shape(anchors)[1])
+        # Anchors
+        anchors = inputs[2] # Anchor的坐标 [fan]
+
+        # Improve performance by trimming(修剪) to top anchors by score
+        # and doing the rest on the smaller subset. 框太多了，在做NMS前先根据框的分数选择一小部分框。PRE_NMS_LIMIT = 6000[fan]
+        pre_nms_limit = tf.minimum(self.config.PRE_NMS_LIMIT, tf.shape(anchors)[1]) # min(6000,num_anchors) [fan]
         ix = tf.nn.top_k(scores, pre_nms_limit, sorted=True,
-                         name="top_anchors").indices
+                         name="top_anchors").indices  # 按照scors排名，保留前pre_nms_limit个anchors的index [1]
+        # (多GPU)取出前景分数靠前的框的 前景概率、RPN位置回归值、Anchor坐标值 [fan]
         scores = utils.batch_slice([scores, ix], lambda x, y: tf.gather(x, y),
                                    self.config.IMAGES_PER_GPU)
         deltas = utils.batch_slice([deltas, ix], lambda x, y: tf.gather(x, y),
@@ -296,7 +301,7 @@ class ProposalLayer(KE.Layer):
                                     names=["pre_nms_anchors"])
 
         # Apply deltas to anchors to get refined anchors.
-        # [batch, N, (y1, x1, y2, x2)]
+        # [batch, N, (y1, x1, y2, x2)]# 利用RPN预测的回归值，对得分靠前的Anchor进行微调[fan]
         boxes = utils.batch_slice([pre_nms_anchors, deltas],
                                   lambda x, y: apply_box_deltas_graph(x, y),
                                   self.config.IMAGES_PER_GPU,
@@ -304,29 +309,31 @@ class ProposalLayer(KE.Layer):
 
         # Clip to image boundaries. Since we're in normalized coordinates,
         # clip to 0..1 range. [batch, N, (y1, x1, y2, x2)]
-        window = np.array([0, 0, 1, 1], dtype=np.float32)
-        boxes = utils.batch_slice(boxes,
+        window = np.array([0, 0, 1, 1], dtype=np.float32) # 坐标值的限定框.因为回归没有做sigmoid这类激活函数,预测值可能会超出(0,1)之间 [fan]
+        boxes = utils.batch_slice(boxes, # 砍掉超出限定边界的边框区域 [fan]
                                   lambda x: clip_boxes_graph(x, window),
                                   self.config.IMAGES_PER_GPU,
                                   names=["refined_anchors_clipped"])
 
-        # Filter out small boxes
+        # Filter out small boxes(这里在simple Faster R-CNN的代码中有，删掉了少于16*16的框 [fan])
         # According to Xinlei Chen's paper, this reduces detection accuracy
         # for small objects, so we're skipping it.
+        # for small objects, so we're skipping it.
 
-        # Non-max suppression
+        # Non-max suppression [4] 执行非极大值抑制，根据IoU阈值选择出2000个rois，如果选择的rois不足2000，则用0进行pad填充
         def nms(boxes, scores):
             indices = tf.image.non_max_suppression(
-                boxes, scores, self.proposal_count,
+                boxes, scores, self.proposal_count,# 参数三为最大返回数目[1]
                 self.nms_threshold, name="rpn_non_max_suppression")
             proposals = tf.gather(boxes, indices)
             # Pad if needed
+            # 一旦返回数目不足, 填充(0,0,0,0)直到数目达标 [1]
             padding = tf.maximum(self.proposal_count - tf.shape(proposals)[0], 0)
             proposals = tf.pad(proposals, [(0, padding), (0, 0)])
             return proposals
         proposals = utils.batch_slice([boxes, scores], nms,
                                       self.config.IMAGES_PER_GPU)
-        return proposals
+        return proposals #[4] 最终返回的proposals赋值给rpn_rois，作为rpn网络提供的建议区，注入后续FPN heads进行分类、目标框和像素分割的检测。
 
     def compute_output_shape(self, input_shape):
         return (None, self.proposal_count, 4)
@@ -338,10 +345,11 @@ class ProposalLayer(KE.Layer):
 
 def log2_graph(x):
     """Implementation of Log2. TF doesn't have a native implementation."""
-    return tf.log(x) / tf.log(2.0)
+    return tf.log(x) / tf.log(2.0) # [fan] log换底公式 https://zhidao.baidu.com/question/497044639399676604.html
 
-
+# [1] PyramidROIAlign用于提取rois区域特征，输出维度为[batch, num_boxes, 7,7,256]
 class PyramidROIAlign(KE.Layer):
+    # [3] 我们需要按照RCNN的思路，使用proposal对共享特征进行ROI操作，在Mask-RCNN中这里有两个创新： 1.ROI使用ROI Align取代了之前的ROI Pooling；2.共享特征由之前的单层变换为了FPN得到的金字塔多层特征，即：mrcnn_feature_maps = [P2, P3, P4, P5]。创新点2意味着我们不同的proposal对应去ROI的特征层并不相同，所以，我们需要：按照proposal的长宽，将不同的proposal对应给不同的特征层；在对应特征层上进行ROI操作。这个class基本实现了我们开篇所说的全部功能，即特征层分类并ROI。
     """Implements ROI Pooling on multiple levels of the feature pyramid.
 
     Params:
@@ -367,46 +375,49 @@ class PyramidROIAlign(KE.Layer):
 
     def call(self, inputs):
         # Crop boxes [batch, num_boxes, (y1, x1, y2, x2)] in normalized coords
-        boxes = inputs[0]
+        # [1]
+        # num_boxes指的是proposal数目，它们均会作用于每张图片上，只是不同的proposal作用于图片
+        # 的特征级别不同，我通过循环特征层寻找符合的proposal，应用ROIAlign
+        boxes = inputs[0] # [fan] 提议框的坐标(已归一化)
 
-        # Image meta
+        # Image meta # [fan] 图像信息
         # Holds details about the image. See compose_image_meta()
         image_meta = inputs[1]
 
         # Feature Maps. List of feature maps from different level of the
         # feature pyramid. Each is [batch, height, width, channels]
-        feature_maps = inputs[2:]
+        feature_maps = inputs[2:] # [fan] 不同分辨率的特征图
 
-        # Assign each ROI to a level in the pyramid based on the ROI area.
-        y1, x1, y2, x2 = tf.split(boxes, 4, axis=2)
-        h = y2 - y1
-        w = x2 - x1
+        # Assign each ROI to a level in the pyramid based on the ROI area. [fan] 根据论文的公式 和 提议框的面积 将提议框分配到特定的特征图
+        y1, x1, y2, x2 = tf.split(boxes, 4, axis=2) # [fan] 提议框的坐标(已归一化) [batch, num_boxes, (y1, x1, y2, x2)] ->  [batch, num_boxes, 1]
+        h = y2 - y1 # [fan] 框高
+        w = x2 - x1 # [fan] 框宽
         # Use shape of first image. Images in a batch must have the same size.
-        image_shape = parse_image_meta_graph(image_meta)['image_shape'][0]
+        image_shape = parse_image_meta_graph(image_meta)['image_shape'][0] # [1]图像的 h, w, c
         # Equation 1 in the Feature Pyramid Networks paper. Account for
         # the fact that our coordinates are normalized here.
-        # e.g. a 224x224 ROI (in pixels) maps to P4
+        # e.g. a 224x224 ROI (in pixels) maps to P4 # [fan] 如果RoI面积是224*224，那么它应该分配到P4特征图
         image_area = tf.cast(image_shape[0] * image_shape[1], tf.float32)
-        roi_level = log2_graph(tf.sqrt(h * w) / (224.0 / tf.sqrt(image_area)))
+        roi_level = log2_graph(tf.sqrt(h * w) / (224.0 / tf.sqrt(image_area))) #[fan] 其实相当于 log_{2}(tf.sqrt(h*w/image_area)/224.0)。如果tf.sqrt(h*w/image_area)=224，那么这一项为0，后面的roi_level=4，即对应到P4特征图
         roi_level = tf.minimum(5, tf.maximum(
-            2, 4 + tf.cast(tf.round(roi_level), tf.int32)))
-        roi_level = tf.squeeze(roi_level, 2)
+            2, 4 + tf.cast(tf.round(roi_level), tf.int32))) # [1] 确保值位于2到5之间
+        roi_level = tf.squeeze(roi_level, 2)# [fan] 这里已经将提议框匹配到对应的特征图了(但实际上还没有求RoI的特征) [1,?,1]->[1,?] 该函数返回一个张量，这个张量是将原始input中第二维度为1的删掉 https://www.jianshu.com/p/a21c0bc10a38
 
         # Loop through levels and apply ROI pooling to each. P2 to P5.
         pooled = []
         box_to_level = []
-        for i, level in enumerate(range(2, 6)):
-            ix = tf.where(tf.equal(roi_level, level))
-            level_boxes = tf.gather_nd(boxes, ix)
+        for i, level in enumerate(range(2, 6)): # [fan] level是特征图的序号，从2到5
+            ix = tf.where(tf.equal(roi_level, level)) # [fan] 之前给提议框绑定特征图了，现在根据提议框的特征图序号选出 与当前循环的特征序号相同的 提议框(的序号) 。 ix的形状是(?,2),维度1是True的个数，维度2是坐标。tf.euqal广播返回[1,?]， tf.where返回[num_true(?), dim_size(condition)(2)]
+            level_boxes = tf.gather_nd(boxes, ix) # [fan] 当前level的提议框的坐标(已归一化) # [1] [本level的proposal数目, 4] # 高级高维切片gather_nd https://www.cnblogs.com/hellcat/p/9819697.html
 
             # Box indices for crop_and_resize.
-            box_indices = tf.cast(ix[:, 0], tf.int32)
+            box_indices = tf.cast(ix[:, 0], tf.int32) # [1] 记录每个propose对应图片序号 [fan] 这里的维度变化我暂时放弃
 
             # Keep track of which box is mapped to which level
             box_to_level.append(ix)
 
             # Stop gradient propogation to ROI proposals
-            level_boxes = tf.stop_gradient(level_boxes)
+            level_boxes = tf.stop_gradient(level_boxes) # [fan]把它们当成常量，不希望RPN改动？ https://github.com/matterport/Mask_RCNN/issues/343
             box_indices = tf.stop_gradient(box_indices)
 
             # Crop and Resize
@@ -415,36 +426,42 @@ class PyramidROIAlign(KE.Layer):
             # interpolating only a single value at each bin center (without
             # pooling) is nearly as effective."
             #
-            # Here we use the simplified approach of a single value per bin,
+            # Here we use the simplified approach of a single value per bin, # [fan] 这里是一个bin(桶)里面只采样一个点,见论文第4页左上角第一段 [fan]
             # which is how it's done in tf.crop_and_resize()
             # Result: [batch * num_boxes, pool_height, pool_width, channels]
             pooled.append(tf.image.crop_and_resize(
-                feature_maps[i], level_boxes, box_indices, self.pool_shape,
+                feature_maps[i], level_boxes, box_indices, self.pool_shape, # [fan] level_boxes是提议框(归一化)的坐标，即从特征图中选择提议框对应的区域做双线性插值，使得不同大小的提议框区域的特征图统一缩放到pool_shape*pool_shape大小
                 method="bilinear"))
 
         # Pack pooled features into one tensor
-        pooled = tf.concat(pooled, axis=0)
+        pooled = tf.concat(pooled, axis=0) # [3] [batch*num_boxes, pool_height, pool_width, channels]
 
         # Pack box_to_level mapping into one array and add another
         # column representing the order of pooled boxes
-        box_to_level = tf.concat(box_to_level, axis=0)
-        box_range = tf.expand_dims(tf.range(tf.shape(box_to_level)[0]), 1)
+        box_to_level = tf.concat(box_to_level, axis=0) # [3] [batch*num_boxes, 2]
+        box_range = tf.expand_dims(tf.range(tf.shape(box_to_level)[0]), 1) # [3] [batch*num_boxes, 1]
         box_to_level = tf.concat([tf.cast(box_to_level, tf.int32), box_range],
-                                 axis=1)
+                                 axis=1) # [3] [batch*num_boxes, 3]
 
         # Rearrange pooled features to match the order of the original boxes
         # Sort box_to_level by batch then box index
         # TF doesn't have a way to sort by two columns, so merge them and sort.
-        sorting_tensor = box_to_level[:, 0] * 100000 + box_to_level[:, 1]
+        # [1]
+        # 截止到目前，我们获取了记录全部ROIAlign结果feat集合的张量pooled，和记录这些feat相关信息的张量box_to_level，
+        # 由于提取方法的原因，此时的feat并不是按照原始顺序排序（先按batch然后按box index排序），下面我们设法将之恢复顺
+        # 序（ROIAlign作用于对应图片的对应proposal生成feat）
+        # [3] box_to_level[i, 0]表示的是当前feat隶属的图片索引，box_to_level[i, 1]表示的是其box序号
+        sorting_tensor = box_to_level[:, 0] * 100000 + box_to_level[:, 1] # [3] [batch*num_boxes]
         ix = tf.nn.top_k(sorting_tensor, k=tf.shape(
             box_to_level)[0]).indices[::-1]
         ix = tf.gather(box_to_level[:, 2], ix)
         pooled = tf.gather(pooled, ix)
 
         # Re-add the batch dimension
+        # [3] [batch, num_boxes, (y1, x1, y2, x2)], [batch*num_boxes, pool_height, pool_width, channels]
         shape = tf.concat([tf.shape(boxes)[:2], tf.shape(pooled)[1:]], axis=0)
         pooled = tf.reshape(pooled, shape)
-        return pooled
+        return pooled # [3] [batch, num_boxes, pool_height, pool_width, channels]
 
     def compute_output_shape(self, input_shape):
         return input_shape[0][:2] + self.pool_shape + (input_shape[2][-1], )
@@ -459,13 +476,13 @@ def overlaps_graph(boxes1, boxes2):
     boxes1, boxes2: [N, (y1, x1, y2, x2)].
     """
     # 1. Tile boxes2 and repeat boxes1. This allows us to compare
-    # every boxes1 against every boxes2 without loops.
+    # every boxes1 against every boxes2 without loops. # [fan] boxes1与boxes2 统一维度，这样就不用使用for循环
     # TF doesn't have an equivalent to np.repeat() so simulate it
     # using tf.tile() and tf.reshape.
     b1 = tf.reshape(tf.tile(tf.expand_dims(boxes1, 1),
                             [1, 1, tf.shape(boxes2)[0]]), [-1, 4])
     b2 = tf.tile(boxes2, [tf.shape(boxes1)[0], 1])
-    # 2. Compute intersections
+    # 2. Compute intersections [fan]计算交集的四个坐标和面积
     b1_y1, b1_x1, b1_y2, b1_x2 = tf.split(b1, 4, axis=1)
     b2_y1, b2_x1, b2_y2, b2_x2 = tf.split(b2, 4, axis=1)
     y1 = tf.maximum(b1_y1, b2_y1)
@@ -473,171 +490,186 @@ def overlaps_graph(boxes1, boxes2):
     y2 = tf.minimum(b1_y2, b2_y2)
     x2 = tf.minimum(b1_x2, b2_x2)
     intersection = tf.maximum(x2 - x1, 0) * tf.maximum(y2 - y1, 0)
-    # 3. Compute unions
+    # 3. Compute unions [fan]计算并集的面积
     b1_area = (b1_y2 - b1_y1) * (b1_x2 - b1_x1)
     b2_area = (b2_y2 - b2_y1) * (b2_x2 - b2_x1)
     union = b1_area + b2_area - intersection
-    # 4. Compute IoU and reshape to [boxes1, boxes2]
+    # 4. Compute IoU and reshape to [boxes1, boxes2] [fan]计算交并比
     iou = intersection / union
-    overlaps = tf.reshape(iou, [tf.shape(boxes1)[0], tf.shape(boxes2)[0]])
+    overlaps = tf.reshape(iou, [tf.shape(boxes1)[0], tf.shape(boxes2)[0]]) # [fan] boxes1与boxes2不是两个框，而是两种许多框；某个boxes1要与所有的boxes2计算交并比，这里将交并比整理成[boxes1, boxes2]的形式，方便理解
     return overlaps
 
 
 def detection_targets_graph(proposals, gt_class_ids, gt_boxes, gt_masks, config):
+    # [5] 获取的就是每个rois和哪个真实的框最接近，计算出和真实框的距离，以及要预测的mask，这些信息都会在网络的头的classify和mask网络所使用
+    # [fan] 如果要对Head进行训练，不仅需要对RPN生成的提议框下采样以减少数量(2000->200)，还需要我们自己生成每个RoIs的类别真值(应当属于哪个类别target_class_ids)、回归真值(与目标框的回归偏移量是多少target_bbox)、RoIs的掩模 , 原始数据提供的仅有RoIs的边界框(target_rois)、原图中物体的边界框(gt_boxes)、原图中物体的类别(input_gt_class_ids)、物体的掩模Mask(其个数是物体的个数 input_gt_masks)
     """Generates detection targets for one image. Subsamples proposals and
     generates target class IDs, bounding box deltas, and masks for each.
 
     Inputs:
     proposals: [POST_NMS_ROIS_TRAINING, (y1, x1, y2, x2)] in normalized coordinates. Might
-               be zero padded if there are not enough proposals.
-    gt_class_ids: [MAX_GT_INSTANCES] int class IDs
-    gt_boxes: [MAX_GT_INSTANCES, (y1, x1, y2, x2)] in normalized coordinates.
-    gt_masks: [height, width, MAX_GT_INSTANCES] of boolean type.
+               be zero padded if there are not enough proposals.# [fan] target_rois/proposals RPN提议的边界框
+    gt_class_ids: [MAX_GT_INSTANCES] int class IDs # [fan] input_gt_class_ids 原图中物体的类别
+    gt_boxes: [MAX_GT_INSTANCES, (y1, x1, y2, x2)] in normalized coordinates. # [fan] gt_boxes 原图中物体的边界框
+    gt_masks: [height, width, MAX_GT_INSTANCES] of boolean type. # [fan] input_gt_masks 物体的Mask(其个数是物体的个数，深度只有1，即只取真实类别的掩模)
 
     Returns: Target ROIs and corresponding class IDs, bounding box shifts,
-    and masks.
-    rois: [TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] in normalized coordinates
-    class_ids: [TRAIN_ROIS_PER_IMAGE]. Integer class IDs. Zero padded.
-    deltas: [TRAIN_ROIS_PER_IMAGE, (dy, dx, log(dh), log(dw))]
-    masks: [TRAIN_ROIS_PER_IMAGE, height, width]. Masks cropped to bbox
+    and masks. # [fan] RoIs的掩模真值(target_mask)
+    rois: [TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] in normalized coordinates # [fan] 这里应该是数量有减少筛选后的提议框
+    class_ids: [TRAIN_ROIS_PER_IMAGE]. Integer class IDs. Zero padded.# [fan] 每个RoIs的类别真值(应当属于哪个类别)
+    deltas: [TRAIN_ROIS_PER_IMAGE, (dy, dx, log(dh), log(dw))] # [fan] 回归真值(与目标框的回归偏移量是多少)
+    masks: [TRAIN_ROIS_PER_IMAGE, height, width]. Masks cropped to bbox # # [fan] RoIs的掩模真值(target_mask)
            boundaries and resized to neural network output size.
 
     Note: Returned arrays might be zero padded if not enough target ROIs.
     """
     # Assertions
     asserts = [
-        tf.Assert(tf.greater(tf.shape(proposals)[0], 0), [proposals],
-                  name="roi_assertion"),
+        tf.Assert(tf.greater(tf.shape(proposals)[0], 0), [proposals], # 比较大小 https://www.jianshu.com/p/e227effbc9ac
+                  name="roi_assertion"), # tf.Assert() 根据条件打印数据   https://blog.csdn.net/u013066730/article/details/98478473
     ]
-    with tf.control_dependencies(asserts):
-        proposals = tf.identity(proposals)
+    # 解释：对于control_dependencies这个管理器，只有当里面的操作是一个op时，才会生效，也就是先执行传入的参数op，再执行里面的op。而y=x仅仅是tensor的一个简单赋值，不是定义的op，所以在图中不会形成一个节点，这样该管理器就失效了。tf.identity是返回一个一模一样新的tensor的op，这会增加一个新节点到gragh中，这时control_dependencies就会生效 https://blog.csdn.net/hu_guan_jie/article/details/78495297
+    with tf.control_dependencies(asserts): # [fan] 先执行asserts这个op：如果proposals的个数不大于0，打印proposals信息；
+        proposals = tf.identity(proposals) # [fan] 然后执行op:复制 (需要是op才有效)
 
-    # Remove zero padding
+    # Remove zero padding # [fan] 去除坐标全零的框，也就是只留下真实存在的有意义的框
     proposals, _ = trim_zeros_graph(proposals, name="trim_proposals")
     gt_boxes, non_zeros = trim_zeros_graph(gt_boxes, name="trim_gt_boxes")
-    gt_class_ids = tf.boolean_mask(gt_class_ids, non_zeros,
+    gt_class_ids = tf.boolean_mask(gt_class_ids, non_zeros, # [fan] 上面判断框是否全零应删除，生成了一个bool值的序列，这里顺带利用这个序列，删除类别和掩模
                                    name="trim_gt_class_ids")
     gt_masks = tf.gather(gt_masks, tf.where(non_zeros)[:, 0], axis=2,
-                         name="trim_gt_masks")
+                         name="trim_gt_masks")# [1] 根据tf.where(non_zeros)[:, 0]从gt_masks中获取非零物体边框对应的masks
 
-    # Handle COCO crowds
+    # Handle COCO crowds 处理COCO训练集中标记为拥挤的框[fan]
     # A crowd box in COCO is a bounding box around several instances. Exclude
-    # them from training. A crowd box is given a negative class ID.
-    crowd_ix = tf.where(gt_class_ids < 0)[:, 0]
-    non_crowd_ix = tf.where(gt_class_ids > 0)[:, 0]
-    crowd_boxes = tf.gather(gt_boxes, crowd_ix)
-    gt_class_ids = tf.gather(gt_class_ids, non_crowd_ix)
-    gt_boxes = tf.gather(gt_boxes, non_crowd_ix)
-    gt_masks = tf.gather(gt_masks, non_crowd_ix, axis=2)
+    # them from training. A crowd box is given a negative class ID. # [fan] 拥挤的框是那种 一个框的附近有很多物体的框。这种框在训练时需要排除。这些框的类别是一个负数。
+    crowd_ix = tf.where(gt_class_ids < 0)[:, 0] # [fan] 拥挤的框序号列表
+    non_crowd_ix = tf.where(gt_class_ids > 0)[:, 0] # [fan] 非拥挤的框序号列表
+    crowd_boxes = tf.gather(gt_boxes, crowd_ix) #[fan] 拥挤的框的坐标
+    gt_class_ids = tf.gather(gt_class_ids, non_crowd_ix) #[fan] 非拥挤的框的类别
+    gt_boxes = tf.gather(gt_boxes, non_crowd_ix) #[fan] 非拥挤的框的坐标
+    gt_masks = tf.gather(gt_masks, non_crowd_ix, axis=2) #[fan] 非拥挤的框对应物体的掩模
 
     # Compute overlaps matrix [proposals, gt_boxes]
-    overlaps = overlaps_graph(proposals, gt_boxes)
+    overlaps = overlaps_graph(proposals, gt_boxes) # [fan] 计算每个RPN提议框和每个gt_boxes的IoU
 
-    # Compute overlaps with crowd boxes [proposals, crowd_boxes]
-    crowd_overlaps = overlaps_graph(proposals, crowd_boxes)
-    crowd_iou_max = tf.reduce_max(crowd_overlaps, axis=1)
-    no_crowd_bool = (crowd_iou_max < 0.001)
+    # Compute overlaps with crowd boxes [proposals, crowd_boxes] 
+    crowd_overlaps = overlaps_graph(proposals, crowd_boxes) # [fan] 计算每个RPN提议框和每个拥挤框的IoU
+    crowd_iou_max = tf.reduce_max(crowd_overlaps, axis=1) #[fan] 每个RPN提议框对应了多个物体框的交并比，取与提议框交并比最大的框作为它分配的真值物体框
+    no_crowd_bool = (crowd_iou_max < 0.001) # [fan] 这里自定义地进一步地细分拥挤框，认为提议框与拥挤框交并比小于0.001的提议框仍然可以作为负类用于训练。
 
-    # Determine positive and negative ROIs
-    roi_iou_max = tf.reduce_max(overlaps, axis=1)
-    # 1. Positive ROIs are those with >= 0.5 IoU with a GT box
+    # Determine positive and negative ROIs 确定RoIs的正类负类
+    roi_iou_max = tf.reduce_max(overlaps, axis=1) #[fan] 每个RPN提议框对应了多个物体框的交并比，取与提议框交并比最大的框作为它分配的真值物体框
+    # 1. Positive ROIs are those with >= 0.5 IoU with a GT box # [fan] RPN提议框与物体框交并比大于等于0.5的提议框视为正类(没有考虑是否拥挤，即不管框内是否有有其他物体)
     positive_roi_bool = (roi_iou_max >= 0.5)
     positive_indices = tf.where(positive_roi_bool)[:, 0]
-    # 2. Negative ROIs are those with < 0.5 with every GT box. Skip crowds.
+    # 2. Negative ROIs are those with < 0.5 with every GT box. Skip crowds. # [fan] RPN提议框与物体框交并比小于0.5 且 RPN提议框与拥挤框交并比小于0.001 的提议框视为负类(考虑了是否拥挤，即最好框内不要有物体，这符合负类即背景类的定义)
     negative_indices = tf.where(tf.logical_and(roi_iou_max < 0.5, no_crowd_bool))[:, 0]
 
-    # Subsample ROIs. Aim for 33% positive
+    # Subsample ROIs #[fan] RPN提议框下采样2000->200(如果数目不足最后会补全0样本，如果正类小于66个，那就不是200个，但是要保证比例是1:3). Aim for 33% positive #[fan] 正类/负类 =1/3
     # Positive ROIs
     positive_count = int(config.TRAIN_ROIS_PER_IMAGE *
-                         config.ROI_POSITIVE_RATIO)
-    positive_indices = tf.random_shuffle(positive_indices)[:positive_count]
-    positive_count = tf.shape(positive_indices)[0]
-    # Negative ROIs. Add enough to maintain positive:negative ratio.
+                         config.ROI_POSITIVE_RATIO) # 200*0.33 取整66，正样本个数 [fan]
+    positive_indices = tf.random_shuffle(positive_indices)[:positive_count] # [fan] 从positive_indices中随机挑选66个。而不是取分数最高或最低的，存疑吧。
+    positive_count = tf.shape(positive_indices)[0] # [fan]实际上正类的数目可能小于66，这里取shape可以得到真实的数目
+    # Negative ROIs. Add enough to maintain positive:negative ratio. # [fan] 保证正负比例为1:3。 不考虑负样本不足的情况么 存疑？
     r = 1.0 / config.ROI_POSITIVE_RATIO
     negative_count = tf.cast(r * tf.cast(positive_count, tf.float32), tf.int32) - positive_count
     negative_indices = tf.random_shuffle(negative_indices)[:negative_count]
-    # Gather selected ROIs
+    # Gather selected ROIs  #[fan] 收拢选中的提议框坐标
     positive_rois = tf.gather(proposals, positive_indices)
     negative_rois = tf.gather(proposals, negative_indices)
-
-    # Assign positive ROIs to GT boxes.
-    positive_overlaps = tf.gather(overlaps, positive_indices)
-    roi_gt_box_assignment = tf.cond(
-        tf.greater(tf.shape(positive_overlaps)[1], 0),
-        true_fn = lambda: tf.argmax(positive_overlaps, axis=1),
-        false_fn = lambda: tf.cast(tf.constant([]),tf.int64)
+    #-----------上面是根据IoU选择提议框----------------fan-------------下面是对选中的提议框绑定真值--------------#
+    # Assign positive ROIs to GT boxes. #[fan] 给选中的正类提议框 绑定上物体边框(类别和回归偏移量)
+    positive_overlaps = tf.gather(overlaps, positive_indices) #[fan] 收拢选中的正类提议框与每个物体框的交并比(还没有求最大)
+    roi_gt_box_assignment = tf.cond( #[fan] 条件判断,得到正类提议框对应的物体框索引。 可参考 https://blog.csdn.net/TeFuirnever/article/details/88875727
+        tf.greater(tf.shape(positive_overlaps)[1], 0),#[fan] 条件：判断positive_overlaps([boxes1, boxes2]) 的形状是否异常 。
+        true_fn = lambda: tf.argmax(positive_overlaps, axis=1), #[fan] 如果形状正常，则依据最大交并比，得到正类提议框对应的物体框索引
+        false_fn = lambda: tf.cast(tf.constant([]),tf.int64) #[fan] 如果形状不正常，返回空
     )
-    roi_gt_boxes = tf.gather(gt_boxes, roi_gt_box_assignment)
-    roi_gt_class_ids = tf.gather(gt_class_ids, roi_gt_box_assignment)
+    roi_gt_boxes = tf.gather(gt_boxes, roi_gt_box_assignment) #[fan] 得到正类提议框对应的物体框的四个坐标值
+    roi_gt_class_ids = tf.gather(gt_class_ids, roi_gt_box_assignment) #[fan] 得到正类提议框对应的物体框的类别
 
-    # Compute bbox refinement for positive ROIs
+    # Compute bbox refinement for positive ROIs # [5]用最接近的真实框修正rpn网络预测的框 #[1]依据roi_gt_boxes对positive_rois进行修正，是与gt_box的差异 #[fan] 计算由提议框变化到物体框的偏移量，作为边框回归的真值
     deltas = utils.box_refinement_graph(positive_rois, roi_gt_boxes)
-    deltas /= config.BBOX_STD_DEV
+    deltas /= config.BBOX_STD_DEV #[fan] 除以方差，simple Faster R-CNN中也有这样的操作。之前RPN的回归预测值是乘以框的方差，我觉得那里是乘有问题。存疑。提了问题：  https://github.com/matterport/Mask_RCNN/issues/1900
 
-    # Assign positive ROIs to GT masks
+    # Assign positive ROIs to GT masks #[fan] 给选中的正类提议框 绑定对应物体的掩模
     # Permute masks to [N, height, width, 1]
-    transposed_masks = tf.expand_dims(tf.transpose(gt_masks, [2, 0, 1]), -1)
+    transposed_masks = tf.expand_dims(tf.transpose(gt_masks, [2, 0, 1]), -1) #[fan] transpose  [height, width, MAX_GT_INSTANCES]-->[MAX_GT_INSTANCES,height, width]  https://blog.csdn.net/weixin_36396470/article/details/86515169
     # Pick the right mask for each ROI
-    roi_masks = tf.gather(transposed_masks, roi_gt_box_assignment)
+    roi_masks = tf.gather(transposed_masks, roi_gt_box_assignment) #[fan] 取提议框所绑定的物体的掩模。一张图片有多少个物体，那就会有多少个Mask。
 
     # Compute mask targets
-    boxes = positive_rois
+    boxes = positive_rois #[fan] 正类提议框的坐标
     if config.USE_MINI_MASK:
         # Transform ROI coordinates from normalized image space
         # to normalized mini-mask space.
-        y1, x1, y2, x2 = tf.split(positive_rois, 4, axis=1)
-        gt_y1, gt_x1, gt_y2, gt_x2 = tf.split(roi_gt_boxes, 4, axis=1)
-        gt_h = gt_y2 - gt_y1
-        gt_w = gt_x2 - gt_x1
-        y1 = (y1 - gt_y1) / gt_h
+        # [fan] 如果采用mini_mask模式，输入的roi_masks就是从全图的Mask中截取物体框区域的掩模并做缩放，需要先求提议框与目标框的交集，然后求交集边界两点在目标框中对应的坐标，根据这两个坐标在物体掩模中截取RoI的掩模
+        # [4]
+        # 如果采用mini_mask模式，则需要在这里将positive_rois转换到roi_gt_boxes的范围内,
+        # 因为在mini_mask模式下，仅仅记录了gt_boxes(某个物体框)内部的mask信息
+        # 正如作者解释注释的＂We store mask pixels that are inside the object bounding box,
+        #rather than a mask of the full image.Most objects are small compared to the image size, so we save space by not storing a lot of zeros around the object.＂
+        # 作者注释可参考./samples/coco/inspect_data.ipynb的Mini_Masks部分
+        y1, x1, y2, x2 = tf.split(positive_rois, 4, axis=1) # 注意这里是positive_rois的坐标值 [fan]
+        gt_y1, gt_x1, gt_y2, gt_x2 = tf.split(roi_gt_boxes, 4, axis=1) # 这里是RoI对应的物体框的坐标值 [fan]
+        gt_h = gt_y2 - gt_y1 # 物体框的高 [fan]
+        gt_w = gt_x2 - gt_x1 # 物体框的宽 [fan]
+        y1 = (y1 - gt_y1) / gt_h # [fan]以物体框的左上角点(gt_x1,gt_y1)为(0,0)，求RoI与物体框的交集的左上角(x1,y1)和右下角坐标(x2,y2)，然后还需要用物体框的长和高 将坐标值归一化(后面的截取函数需要)。
         x1 = (x1 - gt_x1) / gt_w
         y2 = (y2 - gt_y1) / gt_h
         x2 = (x2 - gt_x1) / gt_w
         boxes = tf.concat([y1, x1, y2, x2], 1)
+    # [fan] 如果不使用MINI_MASK，则输入的roi_masks是全图大小的Mask，直接从全图Mask中截取RoI对应区域的掩模，作为RoI的masks 。 无论是物体掩模的RoI交集区域Mask，还是全图掩模的RoI区域的Mask，我觉得都是比较合理的，因为得到的掩模并没有超出RoI能覆盖的区域。
+
+    # [4] 设定每个box对应的id
     box_ids = tf.range(0, tf.shape(roi_masks)[0])
-    masks = tf.image.crop_and_resize(tf.cast(roi_masks, tf.float32), boxes,
+    # [4] 采用tf.image.crop_and_resize根据boxes，box_ids在roi_masks上截取并重采样至28*28，这样mask分支才能正常训练. # [fan] 缩放的方法默认是双线性插值,所以需要是浮点数
+    masks = tf.image.crop_and_resize(tf.cast(roi_masks, tf.float32), boxes, # 参考  https://blog.csdn.net/m0_38024332/article/details/81779544
                                      box_ids,
                                      config.MASK_SHAPE)
     # Remove the extra dimension from masks.
-    masks = tf.squeeze(masks, axis=3)
+    masks = tf.squeeze(masks, axis=3) #[fan]  [N, height, width, 1] -》 [N, height, width]
 
     # Threshold mask pixels at 0.5 to have GT masks be 0 or 1 to use with
     # binary cross entropy loss.
-    masks = tf.round(masks)
+    masks = tf.round(masks) # [fan] 因为是双线性插值，所以会有浮点数。如果>=0.5为1，如果<0.5为0
 
     # Append negative ROIs and pad bbox deltas and masks that
     # are not used for negative ROIs with zeros.
-    rois = tf.concat([positive_rois, negative_rois], axis=0)
-    N = tf.shape(negative_rois)[0]
-    P = tf.maximum(config.TRAIN_ROIS_PER_IMAGE - tf.shape(rois)[0], 0)
-    rois = tf.pad(rois, [(0, P), (0, 0)])
-    roi_gt_boxes = tf.pad(roi_gt_boxes, [(0, N + P), (0, 0)])
-    roi_gt_class_ids = tf.pad(roi_gt_class_ids, [(0, N + P)])
-    deltas = tf.pad(deltas, [(0, N + P), (0, 0)])
-    masks = tf.pad(masks, [[0, N + P], (0, 0), (0, 0)])
+    #[1] 最后如果rois不足200,则用0进行pad填充 #[fan] 从上面的代码看，先确定正类的个数，再根据1:3比例，确定负类的个数，此时负类不一定有那么多 或者 总数不一定能凑足200个，此时就需要用全0来凑数，我觉得全0没有什么实际意义，只是用来凑数。
+    rois = tf.concat([positive_rois, negative_rois], axis=0) #[fan] 合并选中的正负提议框坐标
+    N = tf.shape(negative_rois)[0] #[fan] 负类的个数
+    P = tf.maximum(config.TRAIN_ROIS_PER_IMAGE - tf.shape(rois)[0], 0) #[fan] RoI需要补P才到200
+    rois = tf.pad(rois, [(0, P), (0, 0)]) #[fan] pad是对每一维度的最前和最后进行填充，这里是在后面填充P行的0. 参考：https://blog.csdn.net/qq_40994943/article/details/85331327
+    roi_gt_boxes = tf.pad(roi_gt_boxes, [(0, N + P), (0, 0)]) #[fan] 坐标框补N+P(负类+凑数的)行的0
+    roi_gt_class_ids = tf.pad(roi_gt_class_ids, [(0, N + P)]) #[fan] 类别补N+P(负类+凑数的)行的0
+    deltas = tf.pad(deltas, [(0, N + P), (0, 0)]) #[fan] 回归偏移量补N+P(负类+凑数的)行的0
+    masks = tf.pad(masks, [[0, N + P], (0, 0), (0, 0)]) #[fan] 掩模补N+P(负类+凑数的)行的0
 
     return rois, roi_gt_class_ids, deltas, masks
 
 
 class DetectionTargetLayer(KE.Layer):
     """Subsamples proposals and generates target box refinement, class_ids,
-    and masks for each.
+    and masks for each. # [fan] 如果要对Head进行训练，不仅需要对RPN生成的提议框下采样以减少数量(2000->200)，还需要我们自己生成每个RoIs的类别真值(应当属于哪个类别target_class_ids)、回归真值(与目标框的回归偏移量是多少target_bbox)、RoIs的掩模 , 原始数据提供的仅有RoIs的边界框(target_rois)、原图中物体的边界框(gt_boxes)、原图中物体的类别(input_gt_class_ids)、物体的掩模Mask(其个数是物体的个数 input_gt_masks)
 
     Inputs:
     proposals: [batch, N, (y1, x1, y2, x2)] in normalized coordinates. Might
-               be zero padded if there are not enough proposals.
-    gt_class_ids: [batch, MAX_GT_INSTANCES] Integer class IDs.
-    gt_boxes: [batch, MAX_GT_INSTANCES, (y1, x1, y2, x2)] in normalized
+               be zero padded if there are not enough proposals. # 提议框数目不够，用零来凑[fan]
+    gt_class_ids: [batch, MAX_GT_INSTANCES] Integer class IDs. # 目标框-类别真值 ,MAX_GT_INSTANCES应该是图中物体的个数[fan]
+    gt_boxes: [batch, MAX_GT_INSTANCES, (y1, x1, y2, x2)] in normalized # 目标框-坐标真值 [fan]
               coordinates.
-    gt_masks: [batch, height, width, MAX_GT_INSTANCES] of boolean type
+    gt_masks: [batch, height, width, MAX_GT_INSTANCES] of boolean type # 物体的Mask（其个数是物体的个数) [fan]
 
     Returns: Target ROIs and corresponding class IDs, bounding box shifts,
-    and masks.
+    and masks. # 返回每个ROIs应当属于哪个类别、与目标框的回归偏移量是多少、RoIs的掩模 [fan]
     rois: [batch, TRAIN_ROIS_PER_IMAGE, (y1, x1, y2, x2)] in normalized
-          coordinates
-    target_class_ids: [batch, TRAIN_ROIS_PER_IMAGE]. Integer class IDs.
-    target_deltas: [batch, TRAIN_ROIS_PER_IMAGE, (dy, dx, log(dh), log(dw)]
-    target_mask: [batch, TRAIN_ROIS_PER_IMAGE, height, width]
+          coordinates # 每个RoIs的坐标值 [fan]
+    target_class_ids: [batch, TRAIN_ROIS_PER_IMAGE]. Integer class IDs. # 每个ROIs应当属于哪个类别 [fan]
+    target_deltas: [batch, TRAIN_ROIS_PER_IMAGE, (dy, dx, log(dh), log(dw)] # 每个ROIs与目标框的回归偏移量是多少[fan]
+    target_mask: [batch, TRAIN_ROIS_PER_IMAGE, height, width] # 每个RoIs的掩模[fan]
                  Masks cropped to bbox boundaries and resized to neural
                  network output size.
 
@@ -648,18 +680,18 @@ class DetectionTargetLayer(KE.Layer):
         super(DetectionTargetLayer, self).__init__(**kwargs)
         self.config = config
 
-    def call(self, inputs):
-        proposals = inputs[0]
-        gt_class_ids = inputs[1]
-        gt_boxes = inputs[2]
-        gt_masks = inputs[3]
+    def call(self, inputs): # inputs:target_rois, input_gt_class_ids, gt_boxes, input_gt_masks [fan]
+        proposals = inputs[0] # target_rois/proposals RPN提议的边界框[fan]
+        gt_class_ids = inputs[1] # input_gt_class_ids 原图中物体的类别[fan]
+        gt_boxes = inputs[2] # gt_boxes 原图中物体的边界框[fan]
+        gt_masks = inputs[3] # input_gt_masks 物体的Mask(其个数是物体的个数)[fan]
 
-        # Slice the batch and run a graph for each slice
+        # Slice the batch and run a graph for each slice 多GPU[fan]
         # TODO: Rename target_bbox to target_deltas for clarity
         names = ["rois", "target_class_ids", "target_bbox", "target_mask"]
         outputs = utils.batch_slice(
-            [proposals, gt_class_ids, gt_boxes, gt_masks],
-            lambda w, x, y, z: detection_targets_graph(
+            [proposals, gt_class_ids, gt_boxes, gt_masks], # 输入 [fan]
+            lambda w, x, y, z: detection_targets_graph( # [fan] RoIs筛选到200个 和生成RoIs的类别分类、边框回归、分割真值 的具体实现
                 w, x, y, z, self.config),
             self.config.IMAGES_PER_GPU, names=names)
         return outputs
@@ -683,7 +715,7 @@ class DetectionTargetLayer(KE.Layer):
 
 def refine_detections_graph(rois, probs, deltas, window, config):
     """Refine classified proposals and filter overlaps and return final
-    detections.
+    detections.# [fan:] 根据Head预测的分类和回归输出，对2000个RoIs进行筛选，剔除掉RoIs中预测概率低的、预测为背景的、冗余高度重叠的，然后根据最高分类概率取top-k个RoIs的偏移量，RoIs微调后会作为Mask分支的输入
 
     Inputs:
         rois: [N, (y1, x1, y2, x2)] in normalized coordinates
@@ -695,85 +727,113 @@ def refine_detections_graph(rois, probs, deltas, window, config):
 
     Returns detections shaped: [num_detections, (y1, x1, y2, x2, class_id, score)] where
         coordinates are normalized.
+    [3]
+    注意，下面调用的函数，每次处理的是单张图片。
+    逻辑流程如下：
+    a 获取每个推荐区域得分最高的class的得分
+    b 获取每个推荐区域经过粗修后的坐标和"window"交集的坐标
+    c 剔除掉最高得分为背景的推荐区域
+    d 剔除掉最高得分达不到阈值的推荐区域
+    e 对属于同一类别的候选框进行非极大值抑制
+    f 对非极大值抑制后的框索引：剔除-1占位符，获取top k（100）
+    最后返回每个框(y1, x1, y2, x2, class_id, score)信息
     """
+
     # Class IDs per ROI
-    class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
+    class_ids = tf.argmax(probs, axis=1, output_type=tf.int32) # [3:]  [N]，每张图片预测的最高得分类
     # Class probability of the top class of each ROI
-    indices = tf.stack([tf.range(probs.shape[0]), class_ids], axis=1)
-    class_scores = tf.gather_nd(probs, indices)
+    indices = tf.stack([tf.range(probs.shape[0]), class_ids], axis=1) # [3:]  [N, (图片序号, 预测的最高class序号)]
+    class_scores = tf.gather_nd(probs, indices) # [3:]  [N], 每张图片最高得分类得分值
     # Class-specific bounding box deltas
-    deltas_specific = tf.gather_nd(deltas, indices)
+    deltas_specific = tf.gather_nd(deltas, indices) # [fan]  每张图片预测的最高得分类对应的偏移量
     # Apply bounding box deltas
     # Shape: [boxes, (y1, x1, y2, x2)] in normalized coordinates
-    refined_rois = apply_box_deltas_graph(
+    refined_rois = apply_box_deltas_graph(  # 利用预测的回归值，对框进行微调，微调后的框作为Mask分支的输入[fan]
         rois, deltas_specific * config.BBOX_STD_DEV)
     # Clip boxes to image window
-    refined_rois = clip_boxes_graph(refined_rois, window)
+    refined_rois = clip_boxes_graph(refined_rois, window) # [3] b 获取每个推荐区域经过粗修后的坐标和"window"交集的坐标
 
     # TODO: Filter out boxes with zero area
 
-    # Filter out background boxes
-    keep = tf.where(class_ids > 0)[:, 0]
+    # Filter out background boxes # [3] c 剔除掉最高得分为背景的推荐区域
+    keep = tf.where(class_ids > 0)[:, 0] #  [3] class_ids: N, where(class_ids > 0): [M, 1] 即where会升维
     # Filter out low confidence boxes
-    if config.DETECTION_MIN_CONFIDENCE:
+    if config.DETECTION_MIN_CONFIDENCE: # [3] d 剔除掉最高得分达不到阈值的推荐区域 # 0.7
         conf_keep = tf.where(class_scores >= config.DETECTION_MIN_CONFIDENCE)[:, 0]
+        # [3]
+        # 求交集，返回稀疏Tensor，要求a、b除最后一维外维度相同，最后一维的各个子列分别求交集.[fan] RoIs交集 ： 最高得分不能为背景类 同时 最高得分要超过阈值
+        # a   = np.array([[{1, 2}, {3}], [{4}, {5, 6}]])
+        # b   = np.array([[{1}   , {}] , [{4}, {5, 6, 7, 8}]])
+        # res = np.array([[{1}   , {}] , [{4}, {5, 6}]])
         keep = tf.sets.set_intersection(tf.expand_dims(keep, 0),
                                         tf.expand_dims(conf_keep, 0))
-        keep = tf.sparse_tensor_to_dense(keep)[0]
+        keep = tf.sparse_tensor_to_dense(keep)[0] # [3]  此时使用张量keep保存符合条件的推荐区域的index，即一个一维数组，每个值为一个框的序号，后面会继续对这个keep中的序号做进一步的筛选。
 
-    # Apply per-class NMS
-    # 1. Prepare variables
-    pre_nms_class_ids = tf.gather(class_ids, keep)
-    pre_nms_scores = tf.gather(class_scores, keep)
-    pre_nms_rois = tf.gather(refined_rois,   keep)
-    unique_pre_nms_class_ids = tf.unique(pre_nms_class_ids)[0]
-
+    # Apply per-class NMS  # [3] e 对属于同一类别的候选框进行非极大值抑制 # [fan] RPN后的那次NMS没有分类别地处理，因为只有一类：前景类有坐标
+    # 1. Prepare variables [3] 这一部分代码主要对于当前的信息进行整理为精炼做准备
+    pre_nms_class_ids = tf.gather(class_ids, keep) # [3:]  [n]
+    pre_nms_scores = tf.gather(class_scores, keep) # [3:]  [n]
+    pre_nms_rois = tf.gather(refined_rois,   keep) # [3:]  [n, 4]
+    unique_pre_nms_class_ids = tf.unique(pre_nms_class_ids)[0] # [3:]  去重后class类别
+    '''
+    # tensor 'x' is [1, 1, 2, 4, 4, 4, 7, 8, 8]
+    y, idx = unique(x)
+    y ==> [1, 2, 4, 7, 8] [fan] 这里是输出类似这个的东西 
+    idx ==> [0, 0, 1, 2, 2, 2, 3, 4, 4]
+    '''
+    # [3] 注意下面的内嵌函数，包含keep（step1中保留的框索引）、pre_nms_class_ids（step1中保留的框类别）、pre_nms_scores（step1中保留的框得分）几个外部变量，
     def nms_keep_map(class_id):
         """Apply Non-Maximum Suppression on ROIs of the given class."""
         # Indices of ROIs of the given class
+        # [3] class_id表示当前NMS的目标类的数字，pre_nms_class_ids为全部的疑似目标类
         ixs = tf.where(tf.equal(pre_nms_class_ids, class_id))[:, 0]
         # Apply NMS
         class_keep = tf.image.non_max_suppression(
-                tf.gather(pre_nms_rois, ixs),
-                tf.gather(pre_nms_scores, ixs),
-                max_output_size=config.DETECTION_MAX_INSTANCES,
-                iou_threshold=config.DETECTION_NMS_THRESHOLD)
+                tf.gather(pre_nms_rois, ixs), # [3] 当前class的全部推荐区坐标
+                tf.gather(pre_nms_scores, ixs), # [3]  当前class的全部推荐区得分
+                max_output_size=config.DETECTION_MAX_INSTANCES, # [3]  100
+                iou_threshold=config.DETECTION_NMS_THRESHOLD)  # [3]  0.3
         # Map indices
-        class_keep = tf.gather(keep, tf.gather(ixs, class_keep))
+        # [3] class_keep是对ixs的索引，ixs是对keep的索引
+        class_keep = tf.gather(keep, tf.gather(ixs, class_keep)) # [3] 由索引获取索引
         # Pad with -1 so returned tensors have the same shape
-        gap = config.DETECTION_MAX_INSTANCES - tf.shape(class_keep)[0]
+        gap = config.DETECTION_MAX_INSTANCES - tf.shape(class_keep)[0] # [fan] 每个类别的RoIs默认100个不足补-1
         class_keep = tf.pad(class_keep, [(0, gap)],
                             mode='CONSTANT', constant_values=-1)
         # Set shape so map_fn() can infer result shape
         class_keep.set_shape([config.DETECTION_MAX_INSTANCES])
+        # [3] 返回长度必须固定，否则tf.map_fn不能正常运行
         return class_keep
 
-    # 2. Map over class IDs
+    # 2. Map over class IDs  # [3]  e 对属于同一类别的候选框进行非极大值抑制。
     nms_keep = tf.map_fn(nms_keep_map, unique_pre_nms_class_ids,
-                         dtype=tf.int64)
+                         dtype=tf.int64) # [3：]  [?, 默认100]：类别顺序，每个类别中的框索引，？表示该张图片中保留的类别数（不是实例数注意)
     # 3. Merge results into one list, and remove -1 padding
-    nms_keep = tf.reshape(nms_keep, [-1])
-    nms_keep = tf.gather(nms_keep, tf.where(nms_keep > -1)[:, 0])
+    #[3] f 对非极大值抑制后的框索引：剔除 - 1 占位符
+    nms_keep = tf.reshape(nms_keep, [-1]) #[3] 全部框索引
+    nms_keep = tf.gather(nms_keep, tf.where(nms_keep > -1)[:, 0]) #[3] 剔除-1索引
     # 4. Compute intersection between keep and nms_keep
+    # [3] nms_keep本身就是从keep中截取的，本步感觉冗余
     keep = tf.sets.set_intersection(tf.expand_dims(keep, 0),
                                     tf.expand_dims(nms_keep, 0))
     keep = tf.sparse_tensor_to_dense(keep)[0]
     # Keep top detections
     roi_count = config.DETECTION_MAX_INSTANCES
-    class_scores_keep = tf.gather(class_scores, keep)
+    class_scores_keep = tf.gather(class_scores, keep) # [3] 获取得分
     num_keep = tf.minimum(tf.shape(class_scores_keep)[0], roi_count)
-    top_ids = tf.nn.top_k(class_scores_keep, k=num_keep, sorted=True)[1]
-    keep = tf.gather(keep, top_ids)
+    top_ids = tf.nn.top_k(class_scores_keep, k=num_keep, sorted=True)[1] # [fan] 根据预测的概率 获取top k（100）
+    keep = tf.gather(keep, top_ids) # [3] 由索引获取索引
 
     # Arrange output as [N, (y1, x1, y2, x2, class_id, score)]
     # Coordinates are normalized.
     detections = tf.concat([
-        tf.gather(refined_rois, keep),
-        tf.to_float(tf.gather(class_ids, keep))[..., tf.newaxis],
-        tf.gather(class_scores, keep)[..., tf.newaxis]
+        tf.gather(refined_rois, keep),  # [3]  索引坐标[?, 4]
+        tf.to_float(tf.gather(class_ids, keep))[..., tf.newaxis],  # [3]  索引class，添加维[?, 1]
+        tf.gather(class_scores, keep)[..., tf.newaxis]  # [3]  索引的分，添加维[?, 1]
         ], axis=1)
 
     # Pad with zeros if detections < DETECTION_MAX_INSTANCES
+    # [3] 如果 detections < DETECTION_MAX_INSTANCES，填充0
     gap = config.DETECTION_MAX_INSTANCES - tf.shape(detections)[0]
     detections = tf.pad(detections, [(0, gap), (0, 0)], "CONSTANT")
     return detections
@@ -801,16 +861,17 @@ class DetectionLayer(KE.Layer):
         # Get windows of images in normalized coordinates. Windows are the area
         # in the image that excludes the padding.
         # Use the shape of the first image in the batch to normalize the window
-        # because we know that all images get resized to the same size.
-        m = parse_image_meta_graph(image_meta)
+        # because we know that all images get resized to the same size. fan:这份代码设置所有图像大小一致
+        m = parse_image_meta_graph(image_meta) # [fan]: 得到图片信息 [3] 用于解析并获取输入图片的shape和原始图片的shape（即"window"）
         image_shape = m['image_shape'][0]
-        window = norm_boxes_graph(m['window'], image_shape[:2])
+        window = norm_boxes_graph(m['window'], image_shape[:2]) # [3] (y1, x1, y2, x2). 我们经过"window"获取了原始图片相对输入图片的坐标（像素空间），然后除以输入图片的宽高，得到了原始图片相对于输入图片的normalized坐标，分布于[0,1]区间上。 事实上由于anchors生成的4个坐标值均位于[0,1]，在网络中所有的坐标都是位于[0,1]的，原始图片信息是新的被引入的量，不可或缺的需要被处理到正则空间。
+
 
         # Run detection refinement graph on each item in the batch
         detections_batch = utils.batch_slice(
             [rois, mrcnn_class, mrcnn_bbox, window],
             lambda x, y, w, z: refine_detections_graph(x, y, w, z, self.config),
-            self.config.IMAGES_PER_GPU)
+            self.config.IMAGES_PER_GPU) # [fan:] 根据Head预测的分类和回归输出，对1000个RoIs进行筛选，剔除掉RoIs中预测概率低的、预测为背景的、冗余高度重叠的，然后根据最高分类概率取top-k个RoIs
 
         # Reshape output
         # [batch, num_detections, (y1, x1, y2, x2, class_id, class_score)] in
@@ -843,11 +904,11 @@ def rpn_graph(feature_map, anchors_per_location, anchor_stride):
     """
     # TODO: check if stride of 2 causes alignment issues if the feature map
     # is not even.
-    # Shared convolutional base of the RPN
+    # Shared convolutional base of the RPN # 滑动窗口 [fan]
     shared = KL.Conv2D(512, (3, 3), padding='same', activation='relu',
                        strides=anchor_stride,
                        name='rpn_conv_shared')(feature_map)
-
+    # 分类[fan]
     # Anchor Score. [batch, height, width, anchors per location * 2].
     x = KL.Conv2D(2 * anchors_per_location, (1, 1), padding='valid',
                   activation='linear', name='rpn_class_raw')(shared)
@@ -859,7 +920,7 @@ def rpn_graph(feature_map, anchors_per_location, anchor_stride):
     # Softmax on last dimension of BG/FG.
     rpn_probs = KL.Activation(
         "softmax", name="rpn_class_xxx")(rpn_class_logits)
-
+    # 回归[fan]
     # Bounding box refinement. [batch, H, W, anchors per location * depth]
     # where depth is [x, y, log(w), log(h)]
     x = KL.Conv2D(anchors_per_location * 4, (1, 1), padding="valid",
@@ -868,7 +929,7 @@ def rpn_graph(feature_map, anchors_per_location, anchor_stride):
     # Reshape to [batch, anchors, 4]
     rpn_bbox = KL.Lambda(lambda t: tf.reshape(t, [tf.shape(t)[0], -1, 4]))(x)
 
-    return [rpn_class_logits, rpn_probs, rpn_bbox]
+    return [rpn_class_logits, rpn_probs, rpn_bbox] # rpn_class_logits是由rpn_class_logits经过softmax后产生的 [fan]
 
 
 def build_rpn_model(anchor_stride, anchors_per_location, depth):
@@ -896,7 +957,7 @@ def build_rpn_model(anchor_stride, anchors_per_location, depth):
 ############################################################
 #  Feature Pyramid Network Heads
 ############################################################
-
+# [4] 首先利用PyramidROIAlign提取rois区域的特征，再利用TimeDistributed封装器针对num_rois依次进行7*7->1*1卷积操作，再分出两个次分支，分别用于预测分类和回归框。
 def fpn_classifier_graph(rois, feature_maps, image_meta,
                          pool_size, num_classes, train_bn=True,
                          fc_layers_size=1024):
@@ -915,34 +976,42 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
 
     Returns:
         logits: [batch, num_rois, NUM_CLASSES] classifier logits (before softmax)
-        probs: [batch, num_rois, NUM_CLASSES] classifier probabilities
+        probs: [batch, num_rois, NUM_CLASSES] classifier probabilities # [fan] 经过了softmax的
         bbox_deltas: [batch, num_rois, NUM_CLASSES, (dy, dx, log(dh), log(dw))] Deltas to apply to
                      proposal boxes
     """
     # ROI Pooling
     # Shape: [batch, num_rois, POOL_SIZE, POOL_SIZE, channels]
+    # [1] PyramidROIAlign将pool_size划分的7*7区域(对于mask_pool_size则为14*14)取若干采样点后，
+    # [1] 进行双线性插值得到f(x,y)
+    # [4] PyramidROIAlign层不展开讨论，可认为将pool_size划分的7 * 7
+    # [4] 区域(对于mask_pool_size则为14 * 14) 取若干采样点后，进行双线性插值得到f(x, y)，这个版本的代码中取采样点为1。
     x = PyramidROIAlign([pool_size, pool_size],
                         name="roi_align_classifier")([rois, image_meta] + feature_maps)
-    # Two 1024 FC layers (implemented with Conv2D for consistency)
-    x = KL.TimeDistributed(KL.Conv2D(fc_layers_size, (pool_size, pool_size), padding="valid"),
+
+    # [3] 经过ROI之后，我们获取了众多shape一致的小feat，为了获取他们的分类回归信息，我们构建一系列并行的网络进行处理
+    # Two 1024 FC layers (implemented with Conv2D for consistency) # [fan] 这里的卷积核大小与特征图大小一样大(pool_size*pool_size)，卷积核个数与全连接神经元个数一样(1024)，这里的卷积层 等价于 全连接层 http://cs231n.github.io/convolutional-networks/#convert
+    # [1] conv(1024,7,7)
+    x = KL.TimeDistributed(KL.Conv2D(fc_layers_size, (pool_size, pool_size), padding="valid"), # TimeDistributed 把输入的第一个维度看成是batch(时间)，在相同的层上运算，每个batch(时间)的计算是独立的 https://github.com/matterport/Mask_RCNN/issues/1118#issuecomment-438489399
                            name="mrcnn_class_conv1")(x)
     x = KL.TimeDistributed(BatchNorm(), name='mrcnn_class_bn1')(x, training=train_bn)
     x = KL.Activation('relu')(x)
-    x = KL.TimeDistributed(KL.Conv2D(fc_layers_size, (1, 1)),
+    # [1] conv(1024,1,1)
+    x = KL.TimeDistributed(KL.Conv2D(fc_layers_size, (1, 1)), # [fan] 这里的卷积核大小与特征图大小一样大(1*1)，卷积核个数与全连接神经元个数一样(1024)，这里的卷积层 等价于 全连接层 http://cs231n.github.io/convolutional-networks/#convert
                            name="mrcnn_class_conv2")(x)
     x = KL.TimeDistributed(BatchNorm(), name='mrcnn_class_bn2')(x, training=train_bn)
     x = KL.Activation('relu')(x)
-
+    # [1] [batch, num_rois, 1024]
     shared = KL.Lambda(lambda x: K.squeeze(K.squeeze(x, 3), 2),
                        name="pool_squeeze")(x)
 
-    # Classifier head
+    # Classifier head # 全连接层 神经元个数是81 即类别数(包含背景) ，使用softmax
     mrcnn_class_logits = KL.TimeDistributed(KL.Dense(num_classes),
                                             name='mrcnn_class_logits')(shared)
     mrcnn_probs = KL.TimeDistributed(KL.Activation("softmax"),
                                      name="mrcnn_class")(mrcnn_class_logits)
 
-    # BBox head
+    # BBox head # [fan] 全连接层 神经元个数是81*4 即类别数*4(包含背景) ，使用softmax
     # [batch, num_rois, NUM_CLASSES * (dy, dx, log(dh), log(dw))]
     x = KL.TimeDistributed(KL.Dense(num_classes * 4, activation='linear'),
                            name='mrcnn_bbox_fc')(shared)
@@ -950,9 +1019,12 @@ def fpn_classifier_graph(rois, feature_maps, image_meta,
     s = K.int_shape(x)
     mrcnn_bbox = KL.Reshape((s[1], num_classes, 4), name="mrcnn_bbox")(x)
 
-    return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox
+    return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox # [fan] 框分类，框回归
 
-
+# [1]
+# 利用PyramidROIAlign提取rois区域的特征，
+# 再利用TimeDistributed封装器针对num_rois依次进行3*3--->3*3--->3*3--->3*3卷积操作，
+# 再经过2*2的转置卷积操作，得到像素分割结果。
 def build_fpn_mask_graph(rois, feature_maps, image_meta,
                          pool_size, num_classes, train_bn=True):
     """Builds the computation graph of the mask head of Feature Pyramid Network.
@@ -970,10 +1042,11 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
     """
     # ROI Pooling
     # Shape: [batch, num_rois, MASK_POOL_SIZE, MASK_POOL_SIZE, channels]
+    # [1] PyramidROIAlign用于提取rois区域特征，输出维度为[batch, num_boxes, 14, 14, 256]
     x = PyramidROIAlign([pool_size, pool_size],
                         name="roi_align_mask")([rois, image_meta] + feature_maps)
 
-    # Conv layers
+    # Conv layers # [4] 4层常规3*3卷积层整合特征
     x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
                            name="mrcnn_mask_conv1")(x)
     x = KL.TimeDistributed(BatchNorm(),
@@ -997,10 +1070,13 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
     x = KL.TimeDistributed(BatchNorm(),
                            name='mrcnn_mask_bn4')(x, training=train_bn)
     x = KL.Activation('relu')(x)
-
+    
+    # [4]  1层转置卷积进行上采样，将特征层扩大2倍
     x = KL.TimeDistributed(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relu"),
                            name="mrcnn_mask_deconv")(x)
-    x = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
+    # [4] 最终输出Masks做为分割结果，维度为[batch, num_rois, 28, 28, 81]，这里为每一类实例都提供一个channel，原论文的观点是"避免了不同实例间的种间竞争"。
+    # [fan] 这里的预测输出 与 之前生成的真值roi mask 长宽是一致的；前者的深度为num_classes，后者的深度为1
+    x = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"), # [fan] sigmoid，保证每个像素位置介于01之间
                            name="mrcnn_mask")(x)
     return x
 
@@ -1013,63 +1089,65 @@ def smooth_l1_loss(y_true, y_pred):
     """Implements Smooth-L1 loss.
     y_true and y_pred are typically: [N, 4], but could be any shape.
     """
-    diff = K.abs(y_true - y_pred)
-    less_than_one = K.cast(K.less(diff, 1.0), "float32")
-    loss = (less_than_one * 0.5 * diff**2) + (1 - less_than_one) * (diff - 0.5)
+    diff = K.abs(y_true - y_pred) # fan: 绝对值
+    less_than_one = K.cast(K.less(diff, 1.0), "float32") # fan: 阈值
+    loss = (less_than_one * 0.5 * diff**2) + (1 - less_than_one) * (diff - 0.5) # fan: 两个函数
     return loss
 
 
 def rpn_class_loss_graph(rpn_match, rpn_class_logits):
     """RPN anchor classifier loss.
-
+    # [fan] rpn_match 是所有anchor的类别真值；rpn_class_logits 是所有anchor的类别预测值
     rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
-               -1=negative, 0=neutral anchor.
-    rpn_class_logits: [batch, anchors, 2]. RPN classifier logits for BG/FG.
+               -1=negative, 0=neutral anchor. # [fan] anchor类别真值。0应该代表损失无关的填充
+    rpn_class_logits: [batch, anchors, 2]. RPN classifier logits for BG/FG. # anchor类别预测值
     """
     # Squeeze last dim to simplify
     rpn_match = tf.squeeze(rpn_match, -1)
     # Get anchor classes. Convert the -1/+1 match to 0/1 values.
-    anchor_class = K.cast(K.equal(rpn_match, 1), tf.int32)
+    anchor_class = K.cast(K.equal(rpn_match, 1), tf.int32) # [fan] 将样本的标签值由-1、0、1转为0/1,之前填充的0也包括在变化之后的0中，但是后面只会提取正负样本，也就排除了中立的样本
     # Positive and Negative anchors contribute to the loss,
     # but neutral anchors (match value = 0) don't.
-    indices = tf.where(K.not_equal(rpn_match, 0))
+    indices = tf.where(K.not_equal(rpn_match, 0)) # [1] 提取不等于0的样本对应index,即是提取正负样本
     # Pick rows that contribute to the loss and filter out the rest.
     rpn_class_logits = tf.gather_nd(rpn_class_logits, indices)
-    anchor_class = tf.gather_nd(anchor_class, indices)
+    anchor_class = tf.gather_nd(anchor_class, indices) # [1] anchor_class 对应标签值为0/1的负/正样本
     # Cross entropy loss
-    loss = K.sparse_categorical_crossentropy(target=anchor_class,
+    loss = K.sparse_categorical_crossentropy(target=anchor_class, # [1] 调用的是sparse_softmax_cross_entropy_with_logits
                                              output=rpn_class_logits,
                                              from_logits=True)
-    loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0))
+    loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0)) # [fan] if loss个数大于0, 平均；else 为0.0
     return loss
 
 
 def rpn_bbox_loss_graph(config, target_bbox, rpn_match, rpn_bbox):
+    # [fan] 根据target_bbox与rpn_bbox计算anchors的回归损失
+    # [fan] 输入：  target_bbox是选中的anchor的回归真值；rpn_match是所有anchor的类别真值;rpn_bbox是所有anchor的预测回归值
     """Return the RPN bounding box loss graph.
 
     config: the model config object.
-    target_bbox: [batch, max positive anchors, (dy, dx, log(dh), log(dw))].
+    target_bbox: [batch, max positive anchors(fan:这里指每个批次中正类Anchors个数), (dy, dx, log(dh), log(dw))].
         Uses 0 padding to fill in unsed bbox deltas.
     rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
                -1=negative, 0=neutral anchor.
     rpn_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
     """
     # Positive anchors contribute to the loss, but negative and
-    # neutral anchors (match value of 0 or -1) don't.
+    # neutral anchors (match value of 0 or -1) don't. # [1] 只计算正样本的bbox损失
     rpn_match = K.squeeze(rpn_match, -1)
-    indices = tf.where(K.equal(rpn_match, 1))
+    indices = tf.where(K.equal(rpn_match, 1)) # [fan] indices只记录了选定的正类(有物体/前景)Anchors的回归预测值 的索引
 
-    # Pick bbox deltas that contribute to the loss
-    rpn_bbox = tf.gather_nd(rpn_bbox, indices)
+    # Pick bbox deltas that contribute to the loss #
+    rpn_bbox = tf.gather_nd(rpn_bbox, indices) # [fan] 取 正类(有物体、前景)Anchors的回归预测值  [batch, anchors, (dy, dx, log(dh), log(dw))] =》[anchors, (dy, dx, log(dh), log(dw))]
 
     # Trim target bounding box deltas to the same length as rpn_bbox.
-    batch_counts = K.sum(K.cast(K.equal(rpn_match, 1), tf.int32), axis=1)
+    batch_counts = K.sum(K.cast(K.equal(rpn_match, 1), tf.int32), axis=1) # [fan] 每个batch中正类anchor的个数
     target_bbox = batch_pack_graph(target_bbox, batch_counts,
-                                   config.IMAGES_PER_GPU)
+                                   config.IMAGES_PER_GPU) # [fan] [batch, max positive anchors, (dy, dx, log(dh), log(dw))] =》 [max positive anchors, (dy, dx, log(dh), log(dw))]
 
     loss = smooth_l1_loss(target_bbox, rpn_bbox)
-    
-    loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0))
+
+    loss = K.switch(tf.size(loss) > 0, K.mean(loss), tf.constant(0.0)) # [fan] if loss个数大于0, 平均；else 为0.0
     return loss
 
 
@@ -1078,11 +1156,11 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
     """Loss for the classifier head of Mask RCNN.
 
     target_class_ids: [batch, num_rois]. Integer class IDs. Uses zero
-        padding to fill in the array.
-    pred_class_logits: [batch, num_rois, num_classes]
+        padding to fill in the array. # [fan]  RoIs的类别真值(应当属于哪个类别target_class_ids) ;
+    pred_class_logits: [batch, num_rois, num_classes]  # [fan]   mrcnn_class_logits 是RoIs的类别预测值(softmax前)
     active_class_ids: [batch, num_classes]. Has a value of 1 for
         classes that are in the dataset of the image, and 0
-        for classes that are not in the dataset.
+        for classes that are not in the dataset.  # [fan]  涉及到active_class_ids，即将该图片隶属数据集中所有的class标记为1，不隶属本数据集合的class标记为0，计算Loss贡献时交叉熵会对每个框进行输出一个值，如果这个框最大的得分class并不属于其数据集，则不计本框Loss [3]
     """
     # During model building, Keras calls this function with
     # target_class_ids of type float32. Unclear why. Cast it
@@ -1090,10 +1168,10 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
     target_class_ids = tf.cast(target_class_ids, 'int64')
 
     # Find predictions of classes that are not in the dataset.
-    pred_class_ids = tf.argmax(pred_class_logits, axis=2)
+    pred_class_ids = tf.argmax(pred_class_logits, axis=2) # [fan] 取预测概率最大的那个类
     # TODO: Update this line to work with batch > 1. Right now it assumes all
     #       images in a batch have the same active_class_ids
-    pred_active = tf.gather(active_class_ids[0], pred_class_ids)
+    pred_active = tf.gather(active_class_ids[0], pred_class_ids) # [fan] 每个roi预测的类别有没有(是不是active）就知道了 https://zhuanlan.zhihu.com/p/45673869
 
     # Loss
     loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
@@ -1101,7 +1179,7 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
 
     # Erase losses of predictions of classes that are not in the active
     # classes of the image.
-    loss = loss * pred_active
+    loss = loss * pred_active # [3] 涉及到active_class_ids，即将该图片隶属数据集中所有的class标记为1，不隶属本数据集合的class标记为0，计算Loss贡献时交叉熵会对每个框进行输出一个值，如果这个框最大的得分class并不属于其数据集，则不计本框Loss
 
     # Computer loss mean. Use only predictions that contribute
     # to the loss to get a correct mean.
@@ -1111,30 +1189,32 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
 
 def mrcnn_bbox_loss_graph(target_bbox, target_class_ids, pred_bbox):
     """Loss for Mask R-CNN bounding box refinement.
-
+    # [fan] RoIs的回归真值(RoIs与目标框的回归偏移量是多少target_bbox) ； RoIs的类别真值(应当属于哪个类别target_class_ids，包括负类0) ; pred_bbox 是Head预测的RoIs的回归偏移量
     target_bbox: [batch, num_rois, (dy, dx, log(dh), log(dw))]
     target_class_ids: [batch, num_rois]. Integer class IDs.
     pred_bbox: [batch, num_rois, num_classes, (dy, dx, log(dh), log(dw))]
     """
-    # Reshape to merge batch and roi dimensions for simplicity.
-    target_class_ids = K.reshape(target_class_ids, (-1,))
-    target_bbox = K.reshape(target_bbox, (-1, 4))
-    pred_bbox = K.reshape(pred_bbox, (-1, K.int_shape(pred_bbox)[2], 4))
+    # Reshape to merge batch and roi dimensions for simplicity.[fan:] 简单来说就是batch*num_rois
+    target_class_ids = K.reshape(target_class_ids, (-1,)) # [3] [batch, num_rois] -》 [batch*num_rois]
+    target_bbox = K.reshape(target_bbox, (-1, 4)) # [fan] [batch, num_rois, (dy, dx, log(dh), log(dw))] -》 [batch * num_rois, (dy, dx, log(dh), log(dw))]
+    pred_bbox = K.reshape(pred_bbox, (-1, K.int_shape(pred_bbox)[2], 4)) # [fan] [batch, num_rois, num_classes, (dy, dx, log(dh), log(dw))] -》 [batch*num_rois, num_classes, (dy, dx, log(dh), log(dw))]
 
     # Only positive ROIs contribute to the loss. And only
-    # the right class_id of each ROI. Get their indices.
-    positive_roi_ix = tf.where(target_class_ids > 0)[:, 0]
+    # the right class_id of each ROI. Get their indices. # 只用正类(有物体) 的RoIs 计算回归损失 [fan]
+    # class_ids: N, where(class_ids > 0): [M, 1] 即where会升维 [3]
+    positive_roi_ix = tf.where(target_class_ids > 0)[:, 0] # [M] # [fan:] 正类(有物体)的索引
     positive_roi_class_ids = tf.cast(
-        tf.gather(target_class_ids, positive_roi_ix), tf.int64)
-    indices = tf.stack([positive_roi_ix, positive_roi_class_ids], axis=1)
+        tf.gather(target_class_ids, positive_roi_ix), tf.int64) # [fan] 根据正类的索引取到RoIs真值 正类的类别
+
+    indices = tf.stack([positive_roi_ix, positive_roi_class_ids], axis=1) # [(正类框序号，正类真实类别id)，……] [3]
 
     # Gather the deltas (predicted and true) that contribute to loss
-    target_bbox = tf.gather(target_bbox, positive_roi_ix)
-    pred_bbox = tf.gather_nd(pred_bbox, indices)
+    target_bbox = tf.gather(target_bbox, positive_roi_ix) # [fan] 根据正类的索引取到RoIs真值 正类偏移量
+    pred_bbox = tf.gather_nd(pred_bbox, indices) # 从预测的多个类的回归值中，取出真值类别对应的预测回归值 [fan]
 
     # Smooth-L1 Loss
     loss = K.switch(tf.size(target_bbox) > 0,
-                    smooth_l1_loss(y_true=target_bbox, y_pred=pred_bbox),
+                    smooth_l1_loss(y_true=target_bbox, y_pred=pred_bbox), # 正类的RoIs的类别真值对应的回归预测值  与  回归真值 计算损失[fan]
                     tf.constant(0.0))
     loss = K.mean(loss)
     return loss
@@ -1142,7 +1222,7 @@ def mrcnn_bbox_loss_graph(target_bbox, target_class_ids, pred_bbox):
 
 def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
     """Mask binary cross-entropy loss for the masks head.
-
+    # [fan] target_mask  每个RoIs的掩模 ; 每个RoIs的类别真值(应当属于哪个类别target_class_ids) ; pred_masks:预测的每个RoIs的每个类别的Masks [batch, num_rois, MASK_POOL_SIZE, MASK_POOL_SIZE, NUM_CLASSES]
     target_masks: [batch, num_rois, height, width].
         A float32 tensor of values 0 or 1. Uses zero padding to fill array.
     target_class_ids: [batch, num_rois]. Integer class IDs. Zero padded.
@@ -1167,13 +1247,13 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
     indices = tf.stack([positive_ix, positive_class_ids], axis=1)
 
     # Gather the masks (predicted and true) that contribute to loss
-    y_true = tf.gather(target_masks, positive_ix)
-    y_pred = tf.gather_nd(pred_masks, indices)
+    y_true = tf.gather(target_masks, positive_ix) # [fan] 取真值中的 正类RoIs的mask
+    y_pred = tf.gather_nd(pred_masks, indices) # [fan] 取预测中的 正类RoIs的真实类别的mask
 
     # Compute binary cross entropy. If no positive ROIs, then return 0.
     # shape: [batch, roi, num_classes]
     loss = K.switch(tf.size(y_true) > 0,
-                    K.binary_crossentropy(target=y_true, output=y_pred),
+                    K.binary_crossentropy(target=y_true, output=y_pred), # [3] keras的二进制交叉熵实际调用的就是sigmoid交叉熵的后端 https://www.cnblogs.com/hellcat/p/8568005.html
                     tf.constant(0.0))
     loss = K.mean(loss)
     return loss
@@ -1443,6 +1523,7 @@ def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, config):
 
 
 def build_rpn_targets(image_shape, anchors, gt_class_ids, gt_boxes, config):
+    # [fan] 训练RPN网络时，设定RPN训练样本总数是256个，根据anchor与物体框的交并比，确定Anchor的类别(正类大于0.7、负类小于0.3、与损失不相关的中立类)，从正类中随机选择，并使得样本中正负样本的比例为1：1，然后求正类anchor到物体框的偏移量
     """Given the anchors and GT boxes, compute overlaps and identify positive
     anchors and deltas to refine them to match their corresponding GT boxes.
 
@@ -1456,9 +1537,9 @@ def build_rpn_targets(image_shape, anchors, gt_class_ids, gt_boxes, config):
     rpn_bbox: [N, (dy, dx, log(dh), log(dw))] Anchor bbox deltas.
     """
     # RPN Match: 1 = positive anchor, -1 = negative anchor, 0 = neutral
-    rpn_match = np.zeros([anchors.shape[0]], dtype=np.int32)
+    rpn_match = np.zeros([anchors.shape[0]], dtype=np.int32) # [fan] 注意这里的类别 是所有锚点anchor的类别，没有做筛选
     # RPN bounding boxes: [max anchors per image, (dy, dx, log(dh), log(dw))]
-    rpn_bbox = np.zeros((config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4))
+    rpn_bbox = np.zeros((config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4)) # [fan] 注意这里的偏移量 包括了正类和负类以及无关类，但总数不是所有的anchor数，而是config.RPN_TRAIN_ANCHORS_PER_IMAGE，正类和负类的偏移量直接为0
 
     # Handle COCO crowds
     # A crowd box in COCO is a bounding box around several instances. Exclude
@@ -1633,7 +1714,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
     """A generator that returns images and corresponding target class ids,
     bounding box deltas, and masks.
 
-    dataset: The Dataset object to pick data from
+    dataset: The Dataset object to pick data from 一个对象
     config: The model config object
     shuffle: If True, shuffles the samples before every epoch
     augment: (deprecated. Use augmentation instead). If true, apply random
@@ -1686,7 +1767,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
                                              config.RPN_ANCHOR_STRIDE)
 
     # Keras requires a generator to run indefinitely.
-    while True:
+    while True: # 生成批次的数据，一张图片为一个批次 [fan]
         try:
             # Increment index to pick next image. Shuffle if at the start of an epoch.
             image_index = (image_index + 1) % len(image_ids)
@@ -1714,7 +1795,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             if not np.any(gt_class_ids > 0):
                 continue
 
-            # RPN Targets
+            # RPN Targets # [fan] 训练RPN网络时，根据anchor与物体框的交并比，确定Anchor的类别(正类、负类、与损失不相关的类)，确定RPN训练的样本的个数(随机选择)，并使得样本中正负样本的比例为1：1，然后求正类anchor到物体框的偏移量
             rpn_match, rpn_bbox = build_rpn_targets(image.shape, anchors,
                                                     gt_class_ids, gt_boxes, config)
 
@@ -1727,7 +1808,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
                         build_detection_targets(
                             rpn_rois, gt_class_ids, gt_boxes, gt_masks, config)
 
-            # Init batch arrays
+            # Init batch arrays 一个batch的数据(一张图片一张图片地充能，直到达到一个batch_size就输出)
             if b == 0:
                 batch_image_meta = np.zeros(
                     (batch_size,) + image_meta.shape, dtype=image_meta.dtype)
@@ -1756,7 +1837,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
                             (batch_size,) + mrcnn_bbox.shape, dtype=mrcnn_bbox.dtype)
                         batch_mrcnn_mask = np.zeros(
                             (batch_size,) + mrcnn_mask.shape, dtype=mrcnn_mask.dtype)
-
+            # 如果一张图皮中的物体超出了限制，随机取
             # If more instances than fits in the array, sub-sample from them.
             if gt_boxes.shape[0] > config.MAX_GT_INSTANCES:
                 ids = np.random.choice(
@@ -1833,33 +1914,40 @@ class MaskRCNN():
         self.mode = mode
         self.config = config
         self.model_dir = model_dir
-        self.set_log_dir()
-        self.keras_model = self.build(mode=mode, config=config)
+        self.set_log_dir() # 设置 从以前训练的地方开始训练 或者 从头开始训练，设置模型保存的地址[fan]
+        self.keras_model = self.build(mode=mode, config=config) # 构建Mask R-CNN模型[fan]
 
     def build(self, mode, config):
         """Build Mask R-CNN architecture.
             input_shape: The shape of the input image.
             mode: Either "training" or "inference". The inputs and
-                outputs of the model differ accordingly.
+                outputs of the model differ accordingly.训练 推理 的输入输出尺寸不一致 [fan]
         """
-        assert mode in ['training', 'inference']
+        assert mode in ['training', 'inference'] # 不是这两种字符串会报错[fan]
 
         # Image size must be dividable by 2 multiple times
-        h, w = config.IMAGE_SHAPE[:2]
+        # 输入图像必须能被2的6次方64整除 [1]
+        # 這個網路只接受長寬皆是64倍數的圖片，原因在於經過ResNet以及稍後MaskRCNN裡出現的MaxPooling2D之後，feature map的長寬會變為原來的1/64，為了避免出現不整除的情況，才會有此規定 [2]
+        h, w = config.IMAGE_SHAPE[:2] # 规定、设置 : 长宽需要能被2的6次方64整除[fan]
         if h / 2**6 != int(h / 2**6) or w / 2**6 != int(w / 2**6):
             raise Exception("Image size must be dividable by 2 at least 6 times "
                             "to avoid fractions when downscaling and upscaling."
                             "For example, use 256, 320, 384, 448, 512, ... etc. ")
 
         # Inputs
+        # 训练和测试阶段都有的输入 [fan]
         input_image = KL.Input(
             shape=[None, None, config.IMAGE_SHAPE[2]], name="input_image")
+        # 图片的信息（包含形状、预处理信息等） [1]
         input_image_meta = KL.Input(shape=[config.IMAGE_META_SIZE],
                                     name="input_image_meta")
         if mode == "training":
+            # 训练阶段特有的输入，训练RPN和Faster_RCNN需要的真值 [fan]
             # RPN GT
+            # RPN的输入之一 : Anchor的类别 [batch(批次个数) ,None(某个批次中所有Anchor的个数), 1(1代表是物体，-1代表是背景，0代表与损失无关，)] [fan]
             input_rpn_match = KL.Input(
                 shape=[None, 1], name="input_rpn_match", dtype=tf.int32)
+            # RPN的输入之一 : 正类Anchor的回归真值(偏移量)  [batch(批次个数) ,None(某个批次中选中的用于训练的Anchor个数), 4(四个坐标值，这里的偏移量 包括了正类和负类以及无关类，正类和负类的偏移量直接为0)] [fan]
             input_rpn_bbox = KL.Input(
                 shape=[None, 4], name="input_rpn_bbox", dtype=tf.float32)
 
@@ -1871,37 +1959,50 @@ class MaskRCNN():
             # [batch, MAX_GT_INSTANCES, (y1, x1, y2, x2)] in image coordinates
             input_gt_boxes = KL.Input(
                 shape=[None, 4], name="input_gt_boxes", dtype=tf.float32)
-            # Normalize coordinates
+            # Normalize coordinates 坐标归一化 [fan]
             gt_boxes = KL.Lambda(lambda x: norm_boxes_graph(
                 x, K.shape(input_image)[1:3]))(input_gt_boxes)
             # 3. GT Masks (zero padded)
             # [batch, height, width, MAX_GT_INSTANCES]
-            if config.USE_MINI_MASK:
+            if config.USE_MINI_MASK: # True:只会截取物体框区域的mask，然后缩放到更小的尺寸(56,56)，以减小内存负载。 [fan]
                 input_gt_masks = KL.Input(
                     shape=[config.MINI_MASK_SHAPE[0],
                            config.MINI_MASK_SHAPE[1], None],
                     name="input_gt_masks", dtype=bool)
-            else:
+            else: # False，否则Mask的长宽就是原图像的大小 [fan]
                 input_gt_masks = KL.Input(
                     shape=[config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1], None],
                     name="input_gt_masks", dtype=bool)
         elif mode == "inference":
-            # Anchors in normalized coordinates
+            # [3]： inference模式中，整个程序需要外部输入的变量仅有三个，注意keras的习惯不同于placeholder，下面代码的shape没有包含batch，实际shape是下面的样式：
+            # input_image：输入图片，[batch, None, None, config.IMAGE_SHAPE[2]]
+            # input_image_meta：图片的信息（包含形状、预处理信息等，后面会介绍），[batch, config.IMAGE_META_SIZE]
+            # input_anchors：锚框，[batch, None, 4]
+
+            # 测试阶段特有的输入[fan]：
+            # Anchors in normalized coordinates # [1:] input_anchors：锚框，[batch, None, 4]
             input_anchors = KL.Input(shape=[None, 4], name="input_anchors")
 
+        # [fan] 特征提取、RPN输出下采样(NMS等) 训练和测试过程是一样一样的
         # Build the shared convolutional layers.
         # Bottom-up Layers
         # Returns a list of the last layers of each stage, 5 in total.
         # Don't create the thead (stage 5), so we pick the 4th item in the list.
-        if callable(config.BACKBONE):
+
+        # [1]: config类定义于mrcnn/config.py文件中，这里配置了模型中的众多超参数，会经常看到
+        # config.BACKBONE是用于选择使用何种网络结构，这里使用的是resnet101
+        # config.TOP_DOWN_PYRAMID_SIZE是用于规定FPN网络时的通道数，这里是256
+        # resnet_graph是用于定义resnet函数
+        # 如果不是resnet50、resnet101，就要重新计算
+        if callable(config.BACKBONE): # 需要定义了__call__的对象才为True [fan]
             _, C2, C3, C4, C5 = config.BACKBONE(input_image, stage5=True,
                                                 train_bn=config.TRAIN_BN)
-        else:
-            _, C2, C3, C4, C5 = resnet_graph(input_image, config.BACKBONE,
-                                             stage5=True, train_bn=config.TRAIN_BN)
-        # Top-down Layers
+        else: # 经由如下判断（inference中该参数是字符串"resnet101"，所以进入else分支），建立ResNet网络图[3]
+            _, C2, C3, C4, C5 = resnet_graph(input_image, config.BACKBONE, # 这个函数在文档的"构建ResNet"中详细说明了 [fan]
+                                             stage5=True, train_bn=config.TRAIN_BN) # if config.TRAIN_BN is False , Freeze BN layers. Good when using a small batch size
+        # Top-down Layers # 文档里FPN部分详细描述了。因为要共享RPN等，所以特征图的通道数需要一致，这里是256[fan]
         # TODO: add assert to varify feature map sizes match what's in config
-        P5 = KL.Conv2D(config.TOP_DOWN_PYRAMID_SIZE, (1, 1), name='fpn_c5p5')(C5)
+        P5 = KL.Conv2D(config.TOP_DOWN_PYRAMID_SIZE, (1, 1), name='fpn_c5p5')(C5) #
         P4 = KL.Add(name="fpn_p4add")([
             KL.UpSampling2D(size=(2, 2), name="fpn_p5upsampled")(P5),
             KL.Conv2D(config.TOP_DOWN_PYRAMID_SIZE, (1, 1), name='fpn_c4p4')(C4)])
@@ -1918,88 +2019,100 @@ class MaskRCNN():
         P5 = KL.Conv2D(config.TOP_DOWN_PYRAMID_SIZE, (3, 3), padding="SAME", name="fpn_p5")(P5)
         # P6 is used for the 5th anchor scale in RPN. Generated by
         # subsampling from P5 with stride of 2.
-        P6 = KL.MaxPooling2D(pool_size=(1, 1), strides=2, name="fpn_p6")(P5)
+        P6 = KL.MaxPooling2D(pool_size=(1, 1), strides=2, name="fpn_p6")(P5) # P……
 
-        # Note that P6 is used in RPN, but not in the classifier heads.
+        # Note that P6 is used in RPN, but not in the classifier heads. # [fan]这里的P6是对P5简单地下采样得到的，仅仅是为了在RPN中和512^2面积大小的anchor对应，P6不会在之后的Fast R-CNN中使用
         rpn_feature_maps = [P2, P3, P4, P5, P6]
         mrcnn_feature_maps = [P2, P3, P4, P5]
 
-        # Anchors
+        # Anchors # 生成FPN各个特征图的锚框，不同分辨率的特征图各自对应了一种大小的Anchor(但形状有三种) [fan]
         if mode == "training":
             anchors = self.get_anchors(config.IMAGE_SHAPE)
             # Duplicate across the batch dimension because Keras requires it
             # TODO: can this be optimized to avoid duplicating the anchors?
             anchors = np.broadcast_to(anchors, (config.BATCH_SIZE,) + anchors.shape)
-            # A hack to get around Keras's bad support for constants
+            # A hack to get around(避开) Keras's bad support for constants
             anchors = KL.Lambda(lambda x: tf.Variable(anchors), name="anchors")(input_image)
         else:
             anchors = input_anchors
 
-        # RPN Model
+        # RPN Model 文档里详细描述了 (这里并不包括计算RPN损失的过程,也即这里没有考虑训练RPN的过程，也即这里没有考虑筛选anchor样本生成真值的过程) [fan]
         rpn = build_rpn_model(config.RPN_ANCHOR_STRIDE,
                               len(config.RPN_ANCHOR_RATIOS), config.TOP_DOWN_PYRAMID_SIZE)
-        # Loop through pyramid layers
+        # Loop through pyramid layers # 每个特征图(特征金字塔)共享同一个RPN [fan]
         layer_outputs = []  # list of lists
         for p in rpn_feature_maps:
             layer_outputs.append(rpn([p]))
         # Concatenate layer outputs
         # Convert from list of lists of level outputs to list of lists
         # of outputs across levels.
-        # e.g. [[a1, b1, c1], [a2, b2, c2]] => [[a1, a2], [b1, b2], [c1, c2]]
-        output_names = ["rpn_class_logits", "rpn_class", "rpn_bbox"]
+        # e.g. [[a1, b1, c1], [a2, b2, c2]] => [[a1, a2], [b1, b2], [c1, c2]] !!!!!!!!
+        # 将每一层的输出抽取出来聚合在一起 [1]
+        output_names = ["rpn_class_logits", "rpn_class", "rpn_bbox"] # [fan] 所有anchor的softmax后的预测类别概率，所有anchor的softmax前的预测类别概率，所有anchor回归预测值
         outputs = list(zip(*layer_outputs))
         outputs = [KL.Concatenate(axis=1, name=n)(list(o))
                    for o, n in zip(outputs, output_names)]
+        # [1]:
+        # [batch, num_anchors, 2/4]
+        # 其中num_anchors指的是全部特征层上的anchors总数
+        # 2是class的维度， 4是bbox的维度 # 这里描述的应该是下面三个RPN输出的维度 [fan]
+        rpn_class_logits, rpn_class, rpn_bbox = outputs # rpn_class是由rpn_class_logits经过softmax处理过的 [fan]
 
-        rpn_class_logits, rpn_class, rpn_bbox = outputs
-
-        # Generate proposals
+        # Generate proposals # RPN区域提议和筛选，生成RoIs [fan]
         # Proposals are [batch, N, (y1, x1, y2, x2)] in normalized coordinates
         # and zero padded.
+        # Proposal得到的roi不够config.POST_NMS_ROIS_TRAINING时，在NMS中用0补齐 [1]
         proposal_count = config.POST_NMS_ROIS_TRAINING if mode == "training"\
-            else config.POST_NMS_ROIS_INFERENCE
+            else config.POST_NMS_ROIS_INFERENCE # 训练时NMS后剩余2000个框(测试时NMS后剩余1000个框)[fan]
         rpn_rois = ProposalLayer(
             proposal_count=proposal_count,
             nms_threshold=config.RPN_NMS_THRESHOLD,
             name="ROI",
-            config=config)([rpn_class, rpn_bbox, anchors])
+            config=config)([rpn_class, rpn_bbox, anchors])#[4] 最终返回的proposals赋值给rpn_rois，作为rpn网络提供的建议区，注入后续FPN heads进行分类、目标框和像素分割的检测。 # [fan:] 第一阶段的提议输出，第二阶段Head的输入之一
 
         if mode == "training":
             # Class ID mask to mark class IDs supported by the dataset the image
-            # came from.
+            # came from. # 有的数据集中没有某个类别，计算后面的class_loss时，需要知道哪些类别是不存在的不应该计算，看了一个资料说，这份代码可以在多份数据中运行，需要统一类别吧 [fan] 涉及到active_class_ids相关如下，即将该图片隶属数据集中所有的class标记为1，不隶属本数据集合的class标记为0，计算Loss贡献时交叉熵会对每个框进行输出一个值，如果这个框最大的得分class并不属于其数据集，则不计本框Loss [3]
             active_class_ids = KL.Lambda(
                 lambda x: parse_image_meta_graph(x)["active_class_ids"]
                 )(input_image_meta)
+            # active_class_ids: List of class_ids available in the dataset from which the image came.Useful if training on images from multiple datasets where not all classes are present in all datasets.
 
-            if not config.USE_RPN_ROIS:
+            if not config.USE_RPN_ROIS: # 这里的意思是可选择用RPN生成的提议框作为Head的输入，和不用RPN生成框而使用原始的数据集提供的目标框进行一定修改后作为Head的输入 [fan]
                 # Ignore predicted ROIs and use ROIs provided as an input.
                 input_rois = KL.Input(shape=[config.POST_NMS_ROIS_TRAINING, 4],
                                       name="input_roi", dtype=np.int32)
                 # Normalize coordinates
                 target_rois = KL.Lambda(lambda x: norm_boxes_graph(
                     x, K.shape(input_image)[1:3]))(input_rois)
-            else:
+            else: # 一般情况，是用RPN生成的框训练Head [fan]
                 target_rois = rpn_rois
 
             # Generate detection targets
             # Subsamples proposals and generates target outputs for training
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
+            # [1] target_rois是第二部分ProposalLayer筛选提供的2000个区域建议框，在训练时，2000个显得太多，所以会进一步筛选为200个做为target。[4]
+            # [fan] 如果要对Head进行训练，不仅需要对RPN生成的提议框下采样以减少数量(2000->200)，还需要我们自己生成每个RoIs的类别真值(应当属于哪个类别target_class_ids)、回归真值(与目标框的回归偏移量是多少target_bbox)、RoIs的掩模 , 原始数据提供的仅有RoIs的边界框(target_rois)、原图中物体的边界框(gt_boxes)、原图中物体的类别(input_gt_class_ids)、物体的掩模Mask(其个数是物体的个数 input_gt_masks)
             rois, target_class_ids, target_bbox, target_mask =\
                 DetectionTargetLayer(config, name="proposal_targets")([
                     target_rois, input_gt_class_ids, gt_boxes, input_gt_masks])
 
             # Network Heads
             # TODO: verify that this handles zero padded ROIs
+            # [1] 分支1 fpn_classifier_graph用于分类和回归目标框偏移的
+            # [1] 将rois在对应mrcnn_feature_maps特征层进行roialign特征提取，然后再经过各自的卷积操作预测最终结果。 [fan]mrcnn_class_logits 是RoIs的类别预测值(softmax前)，mrcnn_class 是RoIs的类别预测值(softmax后), mrcnn_bbox 是Head预测的RoIs的回归偏移量
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox =\
                 fpn_classifier_graph(rois, mrcnn_feature_maps, input_image_meta,
-                                     config.POOL_SIZE, config.NUM_CLASSES,
+                                     config.POOL_SIZE, # [1] config.POOL_SIZE是分类分支roialign使用的池化大小，取7
+                                     config.NUM_CLASSES,
                                      train_bn=config.TRAIN_BN,
-                                     fc_layers_size=config.FPN_CLASSIF_FC_LAYERS_SIZE)
-
+                                     fc_layers_size=config.FPN_CLASSIF_FC_LAYERS_SIZE) # [1] config.FPN_CLASSIF_FC_LAYERS_SIZE是分类分支中全连接层尺寸，取1024
+            # [1] 分支2 build_fpn_mask_graph 用于像素分割
+            # [1] 将rois在对应mrcnn_feature_maps特征层进行roialign特征提取，然后再经过各自的卷积操作预测最终结果。
             mrcnn_mask = build_fpn_mask_graph(rois, mrcnn_feature_maps,
                                               input_image_meta,
-                                              config.MASK_POOL_SIZE,
+                                              config.MASK_POOL_SIZE,# [1] config.MASK_POOL_SIZE是mask分支roialign使用的池化大小，取14
                                               config.NUM_CLASSES,
                                               train_bn=config.TRAIN_BN)
 
@@ -2007,16 +2120,24 @@ class MaskRCNN():
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
 
             # Losses
+            # [1] losses可分为两部分组成，
+            # [1] 一是rpn网络的损失，包括rpn前景/背景分类损失rpn_class_loss和 rpn目标框回归损失rpn_bbox_loss；
+            # [1] 类别使用的是 softmax_cross_entropy # [fan] RPN中anchor的分类损失
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(
-                [input_rpn_match, rpn_class_logits])
+                [input_rpn_match, rpn_class_logits]) # [fan] input_rpn_match 是所有anchor的类别真值；rpn_class_logits 是所有anchor的类别预测值
+            # [1] smooth_L1_loss # [fan] RPN中anchor的回归损失
             rpn_bbox_loss = KL.Lambda(lambda x: rpn_bbox_loss_graph(config, *x), name="rpn_bbox_loss")(
-                [input_rpn_bbox, input_rpn_match, rpn_bbox])
+                [input_rpn_bbox, input_rpn_match, rpn_bbox]) # [fan] input_rpn_bbox是选中的anchor的回归真值；input_rpn_match是所有anchor的类别真值;rpn_bbox是所有anchor的预测回归值
+            # [1] 二是mask_rcnn heads损失，包括分类损失class_loss、回归损失bbox_loss和像素分割损失mask_loss
+            # [1] softmax_cross_entropy # [fan] mask_rcnn heads中RoIs的分类损失
             class_loss = KL.Lambda(lambda x: mrcnn_class_loss_graph(*x), name="mrcnn_class_loss")(
-                [target_class_ids, mrcnn_class_logits, active_class_ids])
+                [target_class_ids, mrcnn_class_logits, active_class_ids]) # RoIs的类别真值(应当属于哪个类别target_class_ids) ; mrcnn_class_logits 是RoIs的类别预测值(softmax前) [fan] ；涉及到active_class_ids相关如下，即将该图片隶属数据集中所有的class标记为1，不隶属本数据集合的class标记为0，计算Loss贡献时交叉熵会对每个框进行输出一个值，如果这个框最大的得分class并不属于其数据集，则不计本框Loss [3]
+            # [1] smooth_l1_loss # # [fan] mask_rcnn heads中RoIs的回归(偏移)损失
             bbox_loss = KL.Lambda(lambda x: mrcnn_bbox_loss_graph(*x), name="mrcnn_bbox_loss")(
-                [target_bbox, target_class_ids, mrcnn_bbox])
+                [target_bbox, target_class_ids, mrcnn_bbox]) # [fan] RoIs的回归真值(RoIs与目标框的回归偏移量是多少target_bbox) ； RoIs的类别真值(应当属于哪个类别target_class_ids) ; mrcnn_bbox 是Head预测的RoIs的回归偏移量
+            # [1] binary_cross_entropy # 对 target_mask 和 预测的mrcnn_mask中的target_class_ids的mask 求二分类交叉熵(单元是某类物体/不是某类物体)
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
-                [target_mask, target_class_ids, mrcnn_mask])
+                [target_mask, target_class_ids, mrcnn_mask]) # target_mask: [batch, TRAIN_ROIS_PER_IMAGE, height, width] # [fan:] 每个RoIs的掩模 ; 每个RoIs的类别真值(应当属于哪个类别target_class_ids) ; pred_masks:预测的每个RoIs的每个类别的Masks [batch, num_rois, MASK_POOL_SIZE, MASK_POOL_SIZE, NUM_CLASSES]
 
             # Model
             inputs = [input_image, input_image_meta,
@@ -2029,8 +2150,8 @@ class MaskRCNN():
                        rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss]
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
-            # Network Heads
-            # Proposal classifier and BBox regressor heads
+            # Network Heads # [fan] 测试时 和 训练时 喂入 Heads 的RoIs个数不一样，训练时从2000个RoIs 下采样到 200个，测试时是直接将1000个RoIs传给Heads。猜测：训练时2000个应该是偏多了，测试时考虑到召回率，没有下采样。
+            # Proposal classifier and BBox regressor heads # [fan] Heads分类和回归预测输出 , 训练与测试 使用的函数/模型是一样的（但训练时分类回归分支 和 分割分支是并行的，测试时是先分类回归，筛选掉一些框后，最后做分割）
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox =\
                 fpn_classifier_graph(rpn_rois, mrcnn_feature_maps, input_image_meta,
                                      config.POOL_SIZE, config.NUM_CLASSES,
@@ -2039,27 +2160,43 @@ class MaskRCNN():
 
             # Detections
             # output is [batch, num_detections, (y1, x1, y2, x2, class_id, score)] in
-            # normalized coordinates
+            # normalized coordinates # [fan:] 根据Head预测的分类和回归输出，对1000个RoIs进行筛选，剔除掉RoIs中预测概率低的、预测为背景的、冗余高度重叠的，然后根据最高分类概率取top-k个RoIs的偏移量，RoIs微调后会作为Mask分支的输入
             detections = DetectionLayer(config, name="mrcnn_detection")(
                 [rpn_rois, mrcnn_class, mrcnn_bbox, input_image_meta])
 
-            # Create masks for detections
+            # Create masks for detections # [3] 我们已经获取了待检测图片的分类回归信息，我们将回归信息（即待检测目标的边框信息）单独提取出来，结合金字塔特征mrcnn_feature_maps，进行Mask生成工作（input_image_meta用于提取输入图片长宽，进行金字塔ROI处理，即PyramidROIAlign）。# [fan] 测试时，是求top-k个RoIs回归分支偏移后的框的Mask
             detection_boxes = KL.Lambda(lambda x: x[..., :4])(detections)
             mrcnn_mask = build_fpn_mask_graph(detection_boxes, mrcnn_feature_maps,
                                               input_image_meta,
-                                              config.MASK_POOL_SIZE,
+                                              config.MASK_POOL_SIZE,#[3] 14
                                               config.NUM_CLASSES,
                                               train_bn=config.TRAIN_BN)
+
 
             model = KM.Model([input_image, input_image_meta, input_anchors],
                              [detections, mrcnn_class, mrcnn_bbox,
                                  mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
                              name='mask_rcnn')
+            # [3] 整理一下模型输出Tensor：
+            # num_anchors,    每张图片上生成的锚框数量
+            # num_rois,       每张图片上由锚框筛选出的推荐区数量，
+            # #               由 POST_NMS_ROIS_TRAINING 或 POST_NMS_ROIS_INFERENCE 规定
+            # num_detections, 每张图片上最终检测输出框，
+            # #               由 DETECTION_MAX_INSTANCES 规定
+
+            # detections,     [batch, num_detections, (y1, x1, y2, x2, class_id, score)]
+            # mrcnn_class,    [batch, num_rois, NUM_CLASSES] classifier probabilities
+            # mrcnn_bbox,     [batch, num_rois, NUM_CLASSES, (dy, dx, log(dh), log(dw))]
+            # mrcnn_mask,     [batch, num_detections(top-k), MASK_POOL_SIZE, MASK_POOL_SIZE, NUM_CLASSES]
+            # rpn_rois,       [batch, num_rois, (y1, x1, y2, x2, class_id, score)]
+            # rpn_class,      [batch, num_anchors, 2]
+            # rpn_bbox        [batch, num_anchors, 4]
 
         # Add multi-GPU support.
         if config.GPU_COUNT > 1:
             from mrcnn.parallel_model import ParallelModel
             model = ParallelModel(model, config.GPU_COUNT)
+
 
         return model
 
@@ -2171,8 +2308,8 @@ class MaskRCNN():
                 continue
             loss = (
                 tf.reduce_mean(layer.output, keepdims=True)
-                * self.config.LOSS_WEIGHTS.get(name, 1.))
-            self.keras_model.add_loss(loss)
+                * self.config.LOSS_WEIGHTS.get(name, 1.)) # [fan] config里面设置的都是1 ； get 字典中取键值，默认是1    https://www.runoob.com/python/att-dictionary-get.html
+            self.keras_model.add_loss(loss) # 所有损失加起来
 
         # Add L2 Regularization
         # Skip gamma and beta weights of batch normalization layers.
@@ -2214,7 +2351,7 @@ class MaskRCNN():
             else keras_model.layers
 
         for layer in layers:
-            # Is the layer a model?
+            # Is the layer a model? 可能会有嵌套的model，给model递归设置trainable [fan]
             if layer.__class__.__name__ == 'Model':
                 print("In model: ", layer.name)
                 self.set_trainable(
@@ -2223,7 +2360,7 @@ class MaskRCNN():
 
             if not layer.weights:
                 continue
-            # Is it trainable?
+            # Is it trainable? 根据正则表达式进行选择layer [fan]
             trainable = bool(re.fullmatch(layer_regex, layer.name))
             # Update layer. If layer is a container, update inner layer.
             if layer.__class__.__name__ == 'TimeDistributed':
@@ -2597,25 +2734,25 @@ class MaskRCNN():
 
     def get_anchors(self, image_shape):
         """Returns anchor pyramid for the given image size."""
-        backbone_shapes = compute_backbone_shapes(self.config, image_shape)
-        # Cache anchors and reuse if image shape is the same
+        backbone_shapes = compute_backbone_shapes(self.config, image_shape) # 计算各个特征层shape [3]
+        # Cache anchors and reuse if image shape is the same # 如果图片的形状确定了，那么anchor也是确定的，只用生成一次anchor存到内存里后可以复用 [fan]
         if not hasattr(self, "_anchor_cache"):
             self._anchor_cache = {}
         if not tuple(image_shape) in self._anchor_cache:
             # Generate Anchors
             a = utils.generate_pyramid_anchors(
-                self.config.RPN_ANCHOR_SCALES,
-                self.config.RPN_ANCHOR_RATIOS,
-                backbone_shapes,
-                self.config.BACKBONE_STRIDES,
-                self.config.RPN_ANCHOR_STRIDE)
+                self.config.RPN_ANCHOR_SCALES, # anchor的面积 (32^2, 64^2, 128^2, 256^2, 512^2)[fan]
+                self.config.RPN_ANCHOR_RATIOS, # anchor长宽比 [0.5, 1, 2] [fan]
+                backbone_shapes, # 特征图长宽 256，128，64，32，16 [fan]
+                self.config.BACKBONE_STRIDES, # [4:] BACKBONE_STRIDES 是特征图的降采样倍数，取[4, 8, 16, 32, 64]
+                self.config.RPN_ANCHOR_STRIDE) # 是锚框采样的步长，取1 [4]
             # Keep a copy of the latest anchors in pixel coordinates because
             # it's used in inspect_model notebooks.
             # TODO: Remove this after the notebook are refactored to not use it
-            self.anchors = a
-            # Normalize coordinates
+            self.anchors = a # 这一步是为了可视化，如果不需要可视化可以删除 [fan]
+            # Normalize coordinates 归一化 [fan]
             self._anchor_cache[tuple(image_shape)] = utils.norm_boxes(a, image_shape[:2])
-        return self._anchor_cache[tuple(image_shape)]
+        return self._anchor_cache[tuple(image_shape)] # 返回对应图片形状的anchor [fan]
 
     def ancestor(self, tensor, name, checked=None):
         """Finds the ancestor of a TF tensor in the computation graph.
@@ -2774,7 +2911,7 @@ def parse_image_meta(meta):
 def parse_image_meta_graph(meta):
     """Parses a tensor that contains image attributes to its components.
     See compose_image_meta() for more details.
-
+    # 将列表形式按顺序存储的数据属性，转换为字典形式的 [fan]
     meta: [batch, meta length] where meta length depends on NUM_CLASSES
 
     Returns a dict of the parsed tensors.
@@ -2819,8 +2956,8 @@ def trim_zeros_graph(boxes, name='trim_zeros'):
     boxes: [N, 4] matrix of boxes.
     non_zeros: [N] a 1D boolean mask identifying the rows to keep
     """
-    non_zeros = tf.cast(tf.reduce_sum(tf.abs(boxes), axis=1), tf.bool)
-    boxes = tf.boolean_mask(boxes, non_zeros, name=name)
+    non_zeros = tf.cast(tf.reduce_sum(tf.abs(boxes), axis=1), tf.bool) # [fan] 每个框的四个坐标加和得到一些值，对这些值中大于0的为True,小于或等于0的为False。这样就把坐标全零的框标识出来了。
+    boxes = tf.boolean_mask(boxes, non_zeros, name=name) # [fan] 通过bool值进行筛选
     return boxes, non_zeros
 
 
@@ -2830,11 +2967,11 @@ def batch_pack_graph(x, counts, num_rows):
     """
     outputs = []
     for i in range(num_rows):
-        outputs.append(x[i, :counts[i]])
+        outputs.append(x[i, :counts[i]]) # 这里使用从头切片而不是索引，是因为这里的真值 有意设置为先放正类，再放负类，最后放填充的无关类。
     return tf.concat(outputs, axis=0)
 
 
-def norm_boxes_graph(boxes, shape):
+def norm_boxes_graph(boxes, shape): # 将框的四个坐标值归一化 [fan]
     """Converts boxes from pixel coordinates to normalized coordinates.
     boxes: [..., (y1, x1, y2, x2)] in pixel coordinates
     shape: [..., (height, width)] in pixels
@@ -2845,10 +2982,11 @@ def norm_boxes_graph(boxes, shape):
     Returns:
         [..., (y1, x1, y2, x2)] in normalized coordinates
     """
-    h, w = tf.split(tf.cast(shape, tf.float32), 2)
-    scale = tf.concat([h, w, h, w], axis=-1) - tf.constant(1.0)
-    shift = tf.constant([0., 0., 1., 1.])
-    return tf.divide(boxes - shift, scale)
+    # h，w 分别为输入图像的高和宽 [1]
+    h, w = tf.split(tf.cast(shape, tf.float32), 2) # 1.第二个参数是整数2，这个整数代表这个张量最后会被切成2个小张量，shape:(2,)被平分成两个子tensor:h和w .  https://blog.csdn.net/SangrealLilith/article/details/80272346 [fan]
+    scale = tf.concat([h, w, h, w], axis=-1) - tf.constant(1.0) # [1] 减1是因为图像以0为起点  [fan]  1.concat(): Concatenates tensors along one dimension. 2.Negative axis are interpreted as counting from the end of the rank  https://tensorflow.google.cn/versions/r1.12/api_docs/python/tf/concat
+    shift = tf.constant([0., 0., 1., 1.]) # (y1, x1, y2, x2) [1] 为什么左上角坐标减0，而右下角减(1,1) [fan]
+    return tf.divide(boxes - shift, scale) # 归一化到[0, 1]之间 [1] 这里是浮点数相除，所以可以保留小数点 [fan]
 
 
 def denorm_boxes_graph(boxes, shape):
